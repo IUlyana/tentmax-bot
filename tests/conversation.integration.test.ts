@@ -210,9 +210,15 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
     assert.equal((await lead()).step,'contact_name');
     await message('Александр');
     const phoneLead = await lead(); assert.equal(phoneLead.step,'phone');
-    const phonePrompt = calls.filter(c => ['sendMessage','editMessageText'].includes(c.method) && c.payload.text.includes('Оставьте номер')).at(-1)!;
+    const phonePrompt = calls.filter(c => ['sendMessage','editMessageText'].includes(c.method) && c.payload.text.includes('Поделитесь, пожалуйста, своим контактом')).at(-1)!;
     assert.equal(phonePrompt.payload.reply_markup?.keyboard,undefined);
+    assert.match(phonePrompt.payload.text,/скрепку → «Контакт»/);
     await message(undefined,{phone_number:'79991234567',first_name:'Чужой',user_id:43}); assert.equal((await lead()).step,'phone');
+    await message(undefined,{phone_number:'79991234567',first_name:'Клиент',user_id:42});
+    assert.equal((await lead()).step,'review');
+    assert.equal((await lead()).phone,'+79991234567');
+    // Manual entry remains available when sharing a contact is inconvenient.
+    await message('/edit'); await click('field_phone');
     await message('+7 (999) 123-45-67'); assert.equal((await lead()).step,'review');
     assert.ok(calls.some(c => c.method==='editMessageText' && c.payload.business_connection_id==='business-test'));
     const reviewPrompt = visible.get((await lead()).prompt_message_id!);
@@ -271,7 +277,8 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
     assert.notEqual((await db.findLead('',42))?.prompt_message_id,direct.prompt_message_id);
     await db.pool.query(`UPDATE leads SET step='phone' WHERE id=$1`,[direct.id]);
     await message('/resume',undefined,false);
-    assert.ok(calls.some(c => c.method==='sendMessage' && c.payload.reply_markup?.keyboard?.[0]?.[0]?.request_contact));
+    const contactButton = calls.filter(c => c.method==='sendMessage' && c.payload.reply_markup?.keyboard?.[0]?.[0]?.request_contact).at(-1)?.payload.reply_markup.keyboard[0][0];
+    assert.equal(contactButton?.text,'Поделиться контактом');
     await message(undefined,{phone_number:'79997654321',first_name:'Клиент',user_id:42},false);
     const directReview = await db.findLead('',42);
     assert.equal(directReview?.phone,'+79997654321');

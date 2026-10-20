@@ -35,7 +35,9 @@ export async function sendPrompt(bot: Bot, lead: Lead, prefix?: string, display:
   const keyboard = new InlineKeyboard();
   for (const [label, action] of options) keyboard.text(label, callbackData(lead, action)).row();
   let text = [prefix, prompt(lead)].filter(Boolean).join('\n\n');
-  if (lead.step === 'phone') text += business ? '\nВ этом чате номер нужно ввести вручную.' : '\nМожно поделиться контактом кнопкой ниже или ввести номер вручную.';
+  if (lead.step === 'phone') text += business
+    ? '\nНажмите скрепку → «Контакт» и отправьте свой контакт. Если так неудобно, можно написать номер вручную.'
+    : '\nНажмите «Поделиться контактом» ниже. Если так неудобно, можно написать номер вручную.';
   const fallback = !!(lead.text_choices && business);
   if (fallback && options.length) text += '\n\n' + options.map(([label]) => `• ${label}`).join('\n') + '\nНапишите название подходящего варианта.';
   const replyKeyboard = !business && lead.step === 'phone';
@@ -56,7 +58,7 @@ export async function sendPrompt(bot: Bot, lead: Lead, prefix?: string, display:
       }
     }
     const markup = replyKeyboard
-      ? new Keyboard().requestContact('Поделиться номером телефона').resized().oneTime()
+      ? new Keyboard().requestContact('Поделиться контактом').resized().oneTime()
       : !business && lead.prompt_has_reply_keyboard ? {remove_keyboard: true as const}
       : inlineMarkup;
     const sent = await bot.api.sendMessage(Number(lead.client_chat_id), text, {business_connection_id: business, reply_markup: markup});
