@@ -28,6 +28,7 @@ export interface Lead {
   client_name: string;
   client_username: string | null;
   first_message: string | null;
+  request_code: string | null;
   service: string | null;
   description: string | null;
   budget: string | null;
@@ -188,4 +189,79 @@ export async function recycleExpired(): Promise<void> {
 export async function getManager(id: number): Promise<Manager | null> {
   const { rows } = await pool.query<Manager>('SELECT * FROM managers WHERE telegram_id=$1 AND is_active=TRUE', [id]);
   return rows[0] ?? null;
+}
+
+export interface EntryInput {
+  connectionId: string;
+  chatId: number;
+  userId: number;
+  name: string;
+  username?: string;
+  text: string;
+  messageId: number;
+}
+export interface ConversationEntry {
+  business_connection_id: string;
+  chat_id: string;
+  user_id: string;
+  client_name: string;
+  username: string | null;
+  message_id: string;
+  message_text: string;
+  request_code: string | null;
+}
+
+export async function recordEntry(data: EntryInput, code: string | null): Promise<void> {
+  await pool.query(`INSERT INTO conversation_entries
+    (business_connection_id,chat_id,user_id,client_name,username,message_id,message_text,request_code,start_after)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,CASE WHEN $8::text IS NULL THEN NULL ELSE now()+interval '3 minutes' END)
+    ON CONFLICT (business_connection_id,chat_id) DO UPDATE SET
+      user_id=EXCLUDED.user_id,client_name=EXCLUDED.client_name,username=EXCLUDED.username,
+      message_id=EXCLUDED.message_id,message_text=EXCLUDED.message_text,
+      request_code=EXCLUDED.request_code,start_after=EXCLUDED.start_after,received_at=now()
+    WHERE conversation_entries.message_id < EXCLUDED.message_id`,
+    [data.connectionId,data.chatId,data.userId,data.name,data.username ?? null,data.messageId,data.text,code]);
+}
+
+export async function dueEntries(): Promise<ConversationEntry[]> {
+  // Do not send a delayed greeting from an old restored backup, outside the
+  // Business reply window. Retain a deduplication tombstone instead.
+  await pool.query(`UPDATE conversation_entries SET start_after=NULL WHERE received_at < now()-interval '23 hours' AND start_after IS NOT NULL`);
+  const {rows} = await pool.query<ConversationEntry>(`SELECT * FROM conversation_entries WHERE start_after <= now() ORDER BY start_after LIMIT 50`);
+  return rows;
+}
+
+export async function activateEntry(entry: ConversationEntry): Promise<Lead | null> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const claimed = await client.query(`UPDATE conversation_entries SET start_after=now()+interval '1 minute'
+      WHERE business_connection_id=$1 AND chat_id=$2 AND message_id=$3 AND start_after <= now()
+      RETURNING *`,[entry.business_connection_id,entry.chat_id,entry.message_id]);
+    if (!claimed.rowCount) { await client.query('ROLLBACK'); return null; }
+    const {rows} = await client.query<Lead>(`INSERT INTO leads
+      (business_connection_id,client_chat_id,client_telegram_id,client_name,client_username,first_message,last_message_id,request_code)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (business_connection_id,client_chat_id) DO NOTHING RETURNING *`,
+      [entry.business_connection_id,entry.chat_id,entry.user_id,entry.client_name,entry.username,entry.message_text,entry.message_id,entry.request_code]);
+    const retry = rows[0] ? undefined : (await client.query<Lead>(`SELECT * FROM leads WHERE business_connection_id=$1 AND client_chat_id=$2
+      AND status='collecting' AND revision=0 AND prompt_message_id IS NULL`,[entry.business_connection_id,entry.chat_id])).rows[0];
+    if (!rows[0] && !retry) await client.query('UPDATE conversation_entries SET start_after=NULL WHERE business_connection_id=$1 AND chat_id=$2',[entry.business_connection_id,entry.chat_id]);
+    await client.query('COMMIT');
+    return rows[0] ?? retry ?? null;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+}
+
+export async function retryEntry(entry: ConversationEntry, leadId: string): Promise<void> {
+  await pool.query(`UPDATE conversation_entries SET start_after=now()+interval '5 seconds'
+    WHERE business_connection_id=$1 AND chat_id=$2 AND message_id=$3
+    AND EXISTS (SELECT 1 FROM leads WHERE id=$4 AND status='collecting' AND revision=0 AND prompt_message_id IS NULL)`,
+    [entry.business_connection_id,entry.chat_id,entry.message_id,leadId]);
+}
+
+export async function finishEntry(entry: ConversationEntry): Promise<void> {
+  await pool.query(`UPDATE conversation_entries SET start_after=NULL WHERE business_connection_id=$1 AND chat_id=$2 AND message_id=$3`,
+    [entry.business_connection_id,entry.chat_id,entry.message_id]);
 }

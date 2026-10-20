@@ -17,12 +17,18 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
   const {createBot} = await import('../src/bot.js');
   const {readFileSync} = await import('node:fs');
   const {callbackData} = await import('../src/conversation.js');
+  const {startDueConversations} = await import('../src/entry.js');
+  const trigger = 'Обязательно отправьте это сообщение и дождитесь ответа. Ваш номер: rv-267087';
+  async function expireEntry(business=true) {
+    await db.pool.query(`UPDATE conversation_entries SET start_after=now()-interval '1 second' WHERE business_connection_id=$1 AND chat_id=42 AND start_after IS NOT NULL`,[business?'business-test':'']);
+  }
   const calls: {method:string;payload:any}[] = [];
   let outgoingId = 1000;
   let updateId = 0;
   let failKeyboard = false;
   let failManager = false;
   let missingPrompt = false;
+  let failFirstGreeting = false;
   const visible = new Map<number,any>();
   function makeBot() {
     const bot = createBot();
@@ -31,6 +37,7 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
       calls.push({method,payload});
       if (method === 'getBusinessConnection') return {ok:true,result:{id:'business-test',user:{id:1,is_bot:false,first_name:'Company'},user_chat_id:1,date:1,is_enabled:true,rights:{can_reply:true}}} as any;
       if (method === 'sendMessage') {
+        if (failFirstGreeting && payload.chat_id===42) { failFirstGreeting=false; return {ok:false,error_code:503,description:'Temporary Telegram outage'} as any; }
         if (failKeyboard && payload.business_connection_id && payload.reply_markup) return {ok:false,error_code:400,description:'Bad Request: reply markup not supported for business messages'} as any;
         if (failManager && payload.chat_id === 9001) return {ok:false,error_code:403,description:'Forbidden: bot was blocked by the user'} as any;
         const result = {message_id:++outgoingId,date:1,chat:{id:payload.chat_id,type:'private'},text:payload.text,business_connection_id:payload.business_connection_id};
@@ -86,8 +93,45 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
     assert.equal((await db.findLead('legacy',2))?.status,'accepted');
     assert.equal((await db.findLead('legacy',2))?.service,'Archived service');
     await message('Здравствуйте');
+    assert.equal(await db.findLead('business-test',42),null);
+    assert.equal(calls.some(c => c.method==='sendMessage'),false);
+    await bot.handleUpdate({update_id:++updateId,business_message:{message_id:++messageId,date:1,chat:{id:42,type:'private'},from,business_connection_id:'business-test',photo:[{file_id:'test',file_unique_id:'test',width:1,height:1}],caption:trigger}} as any);
+    await expireEntry(); await startDueConversations(bot);
+    assert.equal(await db.findLead('business-test',42),null);
+    await message(trigger);
+    await startDueConversations(bot);
+    assert.equal(await db.findLead('business-test',42),null);
+    const delay = await db.pool.query(`SELECT extract(epoch FROM start_after-now())::float AS seconds FROM conversation_entries WHERE chat_id=42`);
+    assert.ok(delay.rows[0].seconds > 170 && delay.rows[0].seconds <= 180);
+    await message('Дополнение');
+    await expireEntry(); await startDueConversations(bot);
+    assert.equal(await db.findLead('business-test',42),null);
+    await message(trigger);
+    await message(undefined,{phone_number:'79991234567',user_id:42});
+    await expireEntry(); await startDueConversations(bot);
+    assert.equal(await db.findLead('business-test',42),null);
+    // Telegram replay must not re-arm a cancelled trigger.
+    await message(trigger,undefined,true,messageId-1);
+    await expireEntry(); await startDueConversations(bot);
+    assert.equal(await db.findLead('business-test',42),null);
+    await message(trigger);
+    await expireEntry();
+    const obsolete = (await db.dueEntries())[0];
+    await message('Ещё одно сообщение');
+    assert.equal(await db.activateEntry(obsolete),null);
+    await message(trigger);
+    await expireEntry();
+    const interrupted = await db.activateEntry((await db.dueEntries())[0]);
+    assert.ok(interrupted);
+    assert.equal(interrupted.prompt_message_id,null);
+    bot = makeBot(); // Resume both the persisted delay and an interrupted start.
+    await startDueConversations(bot);
+    assert.equal(calls.some(c => c.method==='sendMessage'),false);
+    await expireEntry();
+    await Promise.all([startDueConversations(bot),startDueConversations(bot)]);
     const first = await lead();
     assert.equal(first.step,'purpose');
+    assert.equal(first.request_code,'rv-267087');
     assert.ok(calls.find(c => c.method==='sendMessage' && c.payload.reply_markup?.inline_keyboard?.[0]?.[0]?.text==='Склад'));
     await click('warehouse',first,43); assert.equal((await lead()).revision,first.revision);
     await Promise.all([click('warehouse',first),click('production',first)]);
@@ -128,7 +172,7 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
     const notifications = calls.filter(c => c.method==='sendMessage' && c.payload.chat_id===9002);
     assert.equal(notifications.length,1);
     const notice = notifications[0].payload.text;
-    for (const part of ['Казань','22.5 м','40 м','6.2 м','Утеплённый','Александр','+79991234567','@client_test','Назначение:']) assert.ok(notice.includes(part),part);
+    for (const part of ['Казань','22.5 м','40 м','6.2 м','Утеплённый','Александр','+79991234567','@client_test','Назначение:','rv-267087']) assert.ok(notice.includes(part),part);
     assert.ok(!notice.includes('Сроки'));
     assert.ok(notifications[0].payload.reply_markup.inline_keyboard[0][0].callback_data.startsWith('accept:'));
     async function managerClick(id:number,action:string) {
@@ -140,6 +184,12 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
     assert.ok(calls.some(c => c.method==='sendMessage' && c.payload.chat_id===42 && c.payload.business_connection_id==='business-test' && c.payload.text.includes('взял в работу')));
     // Direct chat supports request_contact and own contact submission.
     await message('/request',undefined,false);
+    assert.equal(await db.findLead('',42),null);
+    await message(trigger,undefined,false);
+    failFirstGreeting = true;
+    await expireEntry(false); await startDueConversations(bot);
+    assert.equal((await db.findLead('',42))?.prompt_message_id,null);
+    await expireEntry(false); await startDueConversations(bot);
     const direct = await db.findLead('',42); assert.ok(direct);
     missingPrompt = true;
     await click('sport',direct);

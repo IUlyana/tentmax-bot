@@ -1,6 +1,7 @@
 import { Bot, GrammyError, InlineKeyboard, Keyboard } from 'grammy';
-import { createLead, findLead, getLead, getManager, pool, resetLead, saveAnswer, type Lead } from './db.js';
+import { recordEntry, findLead, getLead, getManager, pool, resetLead, saveAnswer, type Lead } from './db.js';
 import { choices, evaluate, prompt } from './qualification.js';
+import { entryCode } from './entry-message.js';
 import { dispatchOne, recentCounts } from './dispatch.js';
 
 export function callbackData(lead: Lead, action: string): string {
@@ -61,12 +62,10 @@ export async function sendPrompt(bot: Bot, lead: Lead, prefix?: string): Promise
   }
 }
 
-async function receive(bot: Bot, data: { connectionId:string; chatId:number; userId:number; name:string; username?:string; text:string; messageId:number; contact?: {phone_number:string;user_id?:number} }): Promise<void> {
+async function receive(bot: Bot, data: { connectionId:string; chatId:number; userId:number; name:string; username?:string; text:string; messageId:number; entryText?:string; contact?: {phone_number:string;user_id?:number} }): Promise<void> {
   const lead = await findLead(data.connectionId,data.chatId);
   if (!lead) {
-    const result = await createLead({...data,firstMessage:data.text || '[вложение]'});
-    // Concurrent first messages must not both start questionnaires.
-    if (result.created) await sendPrompt(bot,result.lead);
+    await recordEntry(data,entryCode(data.entryText ?? ''));
     return;
   }
   if (Number(lead.last_message_id) >= data.messageId) return;
@@ -107,7 +106,7 @@ export function registerConversation(bot: Bot): void {
     if (!from || from.is_bot || msg.chat.type !== 'private' || msg.sender_business_bot) return;
     const connection = await ctx.getBusinessConnection();
     if (!connection.is_enabled || !connection.rights?.can_reply || from.id === connection.user.id || !msg.business_connection_id) return;
-    await receive(bot,{connectionId:msg.business_connection_id,chatId:msg.chat.id,userId:from.id,name:[from.first_name,from.last_name].filter(Boolean).join(' '),username:from.username,text:(msg.text ?? msg.caption ?? '').trim(),messageId:msg.message_id,contact:msg.contact});
+    await receive(bot,{connectionId:msg.business_connection_id,chatId:msg.chat.id,userId:from.id,name:[from.first_name,from.last_name].filter(Boolean).join(' '),username:from.username,text:(msg.text ?? msg.caption ?? '').trim(),entryText:msg.text,messageId:msg.message_id,contact:msg.contact});
   });
   bot.on('message',async ctx => {
     if (ctx.chat.type !== 'private' || ctx.from.is_bot) return;
@@ -118,11 +117,7 @@ export function registerConversation(bot: Bot): void {
       else if (text === '/status') await ctx.reply(await recentCounts(ctx.from.id));
       return;
     }
-    if (text === '/start' && !await findLead('',ctx.chat.id)) {
-      await ctx.reply(`Здравствуйте! Это TENTMAX. Чтобы обсудить ангар, напишите /request.\nЕсли вы менеджер, передайте администратору ваш Telegram ID: ${ctx.from.id}.`);
-      return;
-    }
-    await receive(bot,{connectionId:'',chatId:ctx.chat.id,userId:ctx.from.id,name:ctx.from.first_name,username:ctx.from.username,text,messageId:ctx.message.message_id,contact:ctx.message.contact});
+    await receive(bot,{connectionId:'',chatId:ctx.chat.id,userId:ctx.from.id,name:ctx.from.first_name,username:ctx.from.username,text,entryText:ctx.message.text,messageId:ctx.message.message_id,contact:ctx.message.contact});
   });
   bot.callbackQuery(/^q:(\d+):(\d+):([a-z_]+)$/,async ctx => {
     const [,id,revision,action] = ctx.match;

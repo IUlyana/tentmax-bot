@@ -71,3 +71,21 @@ DO $$ BEGIN
       ((width IS NULL OR width > 0) AND (length IS NULL OR length > 0) AND (wall_height IS NULL OR wall_height > 0));
   END IF;
 END $$;
+
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS request_code TEXT;
+-- Keep cancelled entries as deduplication records so Telegram redelivery cannot
+-- re-arm a timer. The database clock drives the delay across bot restarts.
+CREATE TABLE IF NOT EXISTS conversation_entries (
+  business_connection_id TEXT NOT NULL,
+  chat_id BIGINT NOT NULL,
+  user_id BIGINT NOT NULL,
+  client_name TEXT NOT NULL,
+  username TEXT,
+  message_id BIGINT NOT NULL,
+  message_text TEXT NOT NULL,
+  request_code TEXT,
+  start_after TIMESTAMPTZ,
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (business_connection_id, chat_id)
+);
+CREATE INDEX IF NOT EXISTS conversation_entries_due_idx ON conversation_entries(start_after) WHERE start_after IS NOT NULL;

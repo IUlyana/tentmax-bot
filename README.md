@@ -1,6 +1,6 @@
 # TENTMAX — заявки на тентовые ангары
 
-TypeScript + grammY + PostgreSQL. The customer writes to the **existing company Telegram account**; the connected Business Bot responds only **after** receiving the customer's first incoming message, collects the TENTMAX project details, requests permission to share data, and sends a qualified lead to one of the managers' **personal Telegram chats**. The manager contacts the customer personally.
+TypeScript + grammY + PostgreSQL. The customer writes to the **existing company Telegram account**; the connected Business Bot responds only after the customer sends the exact entry message below and sends nothing else for 3 minutes, collects the TENTMAX project details, requests permission to share data, and sends a qualified lead to one of the managers' **personal Telegram chats**. The manager contacts the customer personally.
 
 ## Requirements
 
@@ -26,10 +26,10 @@ The server automatically creates database tables and syncs configured managers.
 ### Telegram setup
 
 1. Use [@BotFather](https://t.me/BotFather) to create a bot. Enable **Secretary Mode / Business Mode** for that bot (the current UI may name it differently).
-2. From **each manager's personal account**, open this service bot and send `/start`. If the manager doesn't know their numeric Telegram ID, the bot shows it even before registration; add IDs into `.env` and restart.
+2. From **each manager's personal account**, open this service bot and send `/start`. Add the manager's numeric Telegram ID to `MANAGERS_JSON` and restart first; `/start` then confirms their registration. Unknown users do not receive automatic replies to `/start`.
 3. In the **existing company account**, open `Settings → Telegram Business → Chatbots`, connect the new service bot, allow access to **new customer chats** and enable the permission to **reply to messages**. Exclude internal/company chats. Telegram's wording may vary by app version.
 4. On the website, point the button **to the existing company account**: `https://t.me/<company_username>`. Do **not** point the website to the service bot if using Business mode.
-5. From a third, unrelated Telegram account, write a test message to the company. The bot should ask the first question; after answers and consent, one manager will get an alert.
+5. From a third, unrelated Telegram account, send the exact entry message below to the company and wait 3 minutes without further messages. The bot should then ask the first question; after answers and consent, one manager will get an alert.
 
 ## Сценарий TENTMAX
 
@@ -44,7 +44,9 @@ The server automatically creates database tables and syncs configured managers.
 - Для Business используется `business_connection_id` при отправке и удалении inline-клавиатур. Если API явно отклоняет клавиатуру как неподдерживаемую, режим текстовых ответов сохраняется для этой анкеты: клиент пишет название варианта, без цифр. Прочие ошибки не маскируются этим fallback.
 - «Исправить ответы» появляется только на итоговой проверке и позволяет изменить отдельное поле и вернуться к прерванному вопросу или итоговой проверке. `/resume` повторно показывает текущий вопрос. Для исправления во время заполнения также доступна команда `/edit`. Прогресс сохраняется в PostgreSQL после каждого ответа; тайм-аут анкеты не установлен.
 - Передача менеджеру происходит только после «Отправить заявку» и проверки обязательных полей. «Не отправлять» отменяет передачу. `/new` начинает заново отменённую или оставшуюся без менеджера заявку; принятые заявки повторно не открываются.
-- В личном чате с сервисным ботом клиент начинает через `/request`; `/start` также показывает Telegram ID для регистрации менеджера. Business-диалог начинается только после первого входящего сообщения клиента. Сообщения владельца компании и других ботов игнорируются.
+- Новая анкета в Business и в личном чате с ботом начинается только после отдельного текстового сообщения `Обязательно отправьте это сообщение и дождитесь ответа. Ваш номер: rv-267087` (цифры после `rv-` индивидуальны). Лишний текст или подпись к фото не подходят. Бот молчит 3 минуты; любое следующее входящее сообщение клиента, включая фото, контакт или команду, отменяет автозапуск. Повторная отправка специального сообщения начинает новое ожидание. Повторная доставка одного Telegram update таймер не продлевает. Проверка готовности выполняется каждые 5 секунд.
+- Ожидание хранится в `conversation_entries` в PostgreSQL. После перезапуска бот сначала 3 минуты принимает накопленные обновления, затем возобновляет отложенные запуски. Просроченные более чем на 23 часа запуски отменяются. При временной ошибке первой отправки предусмотрена повторная попытка. Номер обращения сохраняется в заявке и уведомлении менеджеру.
+- `/request`, `/start` и обычное приветствие не начинают новую клиентскую анкету. Для уже начатой анкеты сохраняются возобновление и исправление ответов. Служебные `/start` и `/status` у зарегистрированных менеджеров работают отдельно. Сообщения владельца компании и других ботов игнорируются.
 
 Версия анкеты меняется атомарно при ответах и редактировании. Callback проверяет клиента, чат, Business connection и версию; старые кнопки и параллельные нажатия не меняют данные повторно. Все данные для восстановления хранятся в БД.
 
@@ -86,6 +88,8 @@ Each manager receives a message with purpose, city/region, width, length, straig
 - `src/index.ts` — database initialization and polling startup
 - `src/bot.ts` — bot factory, Business connection and manager handlers
 - `src/conversation.ts` — client messages, callback validation, keyboards and Business fallback
+- `src/entry.ts` — persisted delayed starts after the entry message and silence
+- `src/entry-message.ts` — exact entry-message validation
 - `src/qualification.ts` — questionnaire + validation
 - `src/dispatch.ts` — manager assignment/notifications
 - `src/db.ts` — PostgreSQL queries and state
