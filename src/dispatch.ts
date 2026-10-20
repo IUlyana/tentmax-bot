@@ -1,26 +1,18 @@
 import { Bot, InlineKeyboard } from 'grammy';
 import { config } from './config.js';
+import { summary } from './qualification.js';
 import { pool, type Lead, type Manager, claimLeadDispatch, dispatchFailed, getLead, pendingLeads, recycleExpired, selectManager, setNeedsAttention, setNotified } from './db.js';
 
 export function renderLead(lead: Lead): string {
   const username = lead.client_username ? `@${lead.client_username} — https://t.me/${lead.client_username}` : 'не установлен';
-  const contact = lead.phone || (lead.client_username ? 'Связь через @username' : 'Телефон не указан; клиенту понадобится написать первым');
-  const field = (s: string | null) => (s || '—').slice(0, 1900);
   return [
-    `📥 Новая заявка #${lead.id}`,
-    `Имя: ${lead.client_name}`,
+    `📥 Новая заявка TENTMAX #${lead.id}`,
+    summary(lead),
     `Telegram: ${username}`,
-    `Телефон: ${contact}`,
-    `Telegram ID: ${lead.client_telegram_id} (сам по себе не гарантирует возможность написать)`,
-    '',
-    `Услуга: ${field(lead.service)}`,
-    `Задача: ${field(lead.description)}`,
-    `Бюджет: ${field(lead.budget)}`,
-    `Сроки: ${field(lead.deadline)}`,
-    `Первое сообщение: ${field(lead.first_message)}`,
-    '',
-    'Выберите действие ниже. Если username отсутствует, связь по номеру зависит от приватности Telegram.',
-  ].join('\n').slice(0, 3950);
+    `Telegram ID: ${lead.client_telegram_id}`,
+    `Согласие на передачу: ${lead.consent ? 'получено' : 'не получено'}`,
+    ...(!lead.purpose ? [`Архивная заявка: ${lead.service ?? '—'}; ${lead.description ?? '—'}; бюджет: ${lead.budget ?? '—'}`, `Имя Telegram: ${lead.client_name}`] : []),
+  ].join('\n');
 }
 
 let dispatching = false;
@@ -71,7 +63,7 @@ export async function informClientOnAcceptance(bot: Bot, lead: Lead, manager: Ma
     ? `Вашу заявку #${lead.id} взял в работу менеджер ${name}. Он постарается связаться с вами напрямую.${link ? `\n\nЕсли не получите сообщение или хотите написать первым: ${link}` : ''}`
     : `Вашу заявку #${lead.id} взял в работу менеджер ${name}.${link ? `\n\nУ вас нет публичного @username или телефона — пожалуйста, напишите ему первым: ${link}` : '\n\nПожалуйста, дождитесь сообщения в рабочем чате компании.'}`;
   try {
-    await bot.api.sendMessage(Number(lead.client_chat_id), text, { business_connection_id: lead.business_connection_id });
+    await bot.api.sendMessage(Number(lead.client_chat_id), text, { business_connection_id: lead.business_connection_id || undefined });
   } catch (error) {
     // Telegram Business usually requires a recent incoming customer message (24 hours).
     console.error(`Cannot notify client for lead #${lead.id}:`, error instanceof Error ? error.message : 'Unknown error');

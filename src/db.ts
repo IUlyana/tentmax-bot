@@ -5,11 +5,21 @@ import { config } from './config.js';
 
 export const pool = new pg.Pool({ connectionString: config.databaseUrl, max: 10 });
 
-export type Step = 'service' | 'description' | 'budget' | 'deadline' | 'phone' | 'consent' | 'done';
+export type Step = 'purpose' | 'city' | 'width' | 'length' | 'wall_height' | 'insulation' | 'deadline' | 'contact_name' | 'phone' | 'review' | 'edit' | 'done';
 export type LeadStatus = 'collecting' | 'queued' | 'dispatching' | 'notified' | 'accepted' | 'cancelled' | 'needs_attention';
 
 export interface Lead {
   id: string;
+  purpose: string | null;
+  city: string | null;
+  width: string | null;
+  length: string | null;
+  wall_height: string | null;
+  insulation: string | null;
+  contact_name: string | null;
+  revision: number;
+  resume_step: Step | null;
+  text_choices: boolean;
   business_connection_id: string;
   client_chat_id: string;
   client_telegram_id: string;
@@ -75,35 +85,29 @@ export async function createLead(data: {
   return { lead, created: false };
 }
 
-// Guards against Telegram redelivery and repeated message processing.
-export async function claimMessage(leadId: string, messageId: number, username: string | undefined, name: string): Promise<Lead | null> {
-  const { rows } = await pool.query<Lead>(
-    `UPDATE leads SET last_message_id=$2, client_username=COALESCE($3,client_username), client_name=$4, updated_at=now()
-     WHERE id=$1 AND last_message_id < $2 RETURNING *`,
-    [leadId, messageId, username ?? null, name],
-  );
+// Every answer, edit and submission consumes a revision atomically. Old callbacks
+// and concurrent updates cannot overwrite a newer answer or queue a lead twice.
+export async function saveAnswer(lead: Lead, values: import('./qualification.js').Changes, messageId?: number): Promise<Lead | null> {
+  const allowed = ['purpose','city','width','length','wall_height','insulation','deadline','contact_name','phone','step','status','consent','resume_step'] as const;
+  const entries = allowed.filter(field => values[field] !== undefined).map(field => [field, values[field]] as const);
+  const params: unknown[] = [lead.id, lead.revision, ...entries.map(([,value]) => value)];
+  const assignments = entries.map(([field], i) => `${field}=$${i+3}`);
+  if (messageId !== undefined) {
+    params.push(messageId);
+    assignments.push(`last_message_id=$${params.length}`);
+  }
+  const { rows } = await pool.query<Lead>(`UPDATE leads SET ${assignments.join(',')}, revision=revision+1,updated_at=now()
+    WHERE id=$1 AND revision=$2 AND status='collecting' ${messageId === undefined ? '' : `AND last_message_id < $${params.length}`} RETURNING *`,params);
   return rows[0] ?? null;
 }
 
-export async function updateLead(leadId: string, values: Partial<Pick<Lead, 'step'|'status'|'service'|'description'|'budget'|'deadline'|'phone'|'consent'>>): Promise<void> {
-  const allowed = ['step','status','service','description','budget','deadline','phone','consent'] as const;
-  const entries = allowed.filter((field) => values[field] !== undefined).map((field) => [field, values[field]] as const);
-  if (!entries.length) return;
-  const assignments = entries.map(([field], idx) => `${field}=$${idx + 2}`).join(',');
-  await pool.query(`UPDATE leads SET ${assignments},updated_at=now() WHERE id=$1`, [leadId, ...entries.map(([, val]) => val)]);
-}
-
-export async function queueLead(leadId: string): Promise<void> {
-  await pool.query(`UPDATE leads SET status='queued', step='done', consent=TRUE,updated_at=now() WHERE id=$1 AND status='collecting'`, [leadId]);
-}
-
-export async function resetLead(leadId: string, messageId: number, initialMessage: string): Promise<void> {
-  await pool.query(
-    `UPDATE leads SET first_message=$3,service=NULL,description=NULL,budget=NULL,deadline=NULL,phone=NULL,
-     consent=FALSE,step='service',status='collecting',assigned_manager_id=NULL,tried_manager_ids='{}',
-     notified_at=NULL,accepted_at=NULL,last_message_id=$2,updated_at=now() WHERE id=$1`,
-    [leadId, messageId, initialMessage],
-  );
+export async function resetLead(lead: Lead, messageId: number): Promise<Lead | null> {
+  const { rows } = await pool.query<Lead>(`UPDATE leads SET purpose=NULL,city=NULL,width=NULL,length=NULL,wall_height=NULL,
+    insulation=NULL,contact_name=NULL,deadline=NULL,phone=NULL,consent=FALSE,step='purpose',resume_step=NULL,
+    status='collecting',assigned_manager_id=NULL,tried_manager_ids='{}',notified_at=NULL,accepted_at=NULL,
+    last_message_id=$3,revision=revision+1,updated_at=now()
+    WHERE id=$1 AND revision=$2 AND status IN ('cancelled','needs_attention') AND last_message_id < $3 RETURNING *`,[lead.id,lead.revision,messageId]);
+  return rows[0] ?? null;
 }
 
 export async function selectManager(excluded: string[]): Promise<Manager | null> {
