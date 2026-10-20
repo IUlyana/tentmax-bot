@@ -1,6 +1,6 @@
 import type { Lead, Step } from './db.js';
 
-export const PURPOSES = { warehouse: 'Склад', production: 'Производство', sport: 'Спортивный объект', agriculture: 'Сельское хозяйство', other: 'Другое' };
+export const PURPOSES = { warehouse: 'Склад', production: 'Производство', sport: 'Спортивный объект', padel: 'Падел-корты', agriculture: 'Сельское хозяйство', other: 'Другое' };
 export const INSULATION = { warm: 'Тёплый (2 слоя тента)', cold: 'Холодный', insulated: 'Утеплённый (2 слоя тента + утеплитель)', advice: 'Нужна консультация' };
 export const FIELDS = { purpose: 'Назначение', city: 'Город или регион', width: 'Ширина', length: 'Длина', wall_height: 'Высота прямой стены', insulation: 'Тип ангара', contact_name: 'Имя', phone: 'Телефон' };
 export type Field = keyof typeof FIELDS;
@@ -53,6 +53,13 @@ export function complete(lead: Lead): boolean {
   return firstInvalidField(lead) === null;
 }
 
+// Narrow deterministic guard for obvious keyboard noise. Keep legitimate
+// short places/abbreviations such as Ii, Уфа, Мск and СПб for semantic review.
+export function isRepeatedLetterNoise(raw: string): boolean {
+  const letters = raw.normalize('NFKC').toLocaleLowerCase('ru').replace(/[^\p{L}]/gu,'');
+  return [...letters].length >= 3 && new Set(letters).size === 1;
+}
+
 export function evaluate(lead: Lead, raw: string, action?: string, contactPhone?: string): AnswerResult {
   const text = raw.trim();
   const fail = (reply: string): AnswerResult => ({ok:false,reply});
@@ -83,8 +90,8 @@ export function evaluate(lead: Lead, raw: string, action?: string, contactPhone?
     value = normalizePhone(contactPhone ?? text);
     if (!value) return fail('Проверьте номер: нужен международный формат, например +79991234567. Можно ввести его вручную.');
   } else if (field === 'contact_name') {
-    if (text.length < 2 || text.length > 100 || !/\p{L}/u.test(text) || /[\d\n\r]/.test(text)) return fail('Подскажите ваше имя, пожалуйста. Например, Александр.');
-  } else if (text.length < 2 || text.length > 200 || !/\p{L}/u.test(text) || /[\n\r]/.test(text)) {
+    if (text.length < 2 || text.length > 100 || isRepeatedLetterNoise(text) || !/\p{L}/u.test(text) || /[\d\n\r]/.test(text)) return fail('Подскажите ваше имя, пожалуйста. Например, Александр.');
+  } else if (text.length < 2 || text.length > 200 || isRepeatedLetterNoise(text) || !/\p{L}/u.test(text) || /[\n\r]/.test(text)) {
     return fail('Уточните город или регион установки, пожалуйста.');
   }
   const next = lead.resume_step && lead.resume_step !== field ? lead.resume_step : ORDER[ORDER.indexOf(field) + 1] ?? 'review';

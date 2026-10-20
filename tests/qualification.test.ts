@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { choices, complete, evaluate, INSULATION, normalizeDimension, normalizePhone, ORDER, prompt, PURPOSES } from '../src/qualification.js';
+import { choices, complete, evaluate, INSULATION, normalizeDimension, normalizePhone, ORDER, prompt, PURPOSES, isRepeatedLetterNoise, firstInvalidField } from '../src/qualification.js';
 import type { Lead } from '../src/db.js';
 
 export function sample(): Lead {
@@ -63,4 +63,14 @@ test('city and name validate input and review cannot send incomplete data',() =>
 test('correction button is offered only after the questionnaire is complete', () => {
   for (const step of ORDER) assert.ok(!choices({...sample(),step}).some(([,action]) => action === 'edit'));
   assert.deepEqual(choices({...sample(),step:'review'}).find(([,action]) => action === 'edit'),['Исправить ответы','edit']);
+});
+
+test('repeated letters cannot be accepted as a city or name, even before AI review',() => {
+  for (const text of ['ggg','gggg','GGG','g g g','ааа','ААА','zzzz']) {
+    assert.equal(isRepeatedLetterNoise(text),true,text);
+    assert.equal(evaluate({...sample(),step:'city'},text).ok,false,text);
+    assert.equal(evaluate({...sample(),step:'contact_name'},text).ok,false,text);
+  }
+  for (const text of ['Москва','Уфа','СПб','Мск','Ii','Александр','Ли']) assert.equal(isRepeatedLetterNoise(text),false,text);
+  assert.equal(firstInvalidField({...sample(),purpose:PURPOSES.warehouse,city:'gggg'}),'city');
 });

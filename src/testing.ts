@@ -1,9 +1,10 @@
 import type { Bot } from 'grammy';
+import { APP_VERSION } from './version.js';
 import { config } from './config.js';
 import { clearTestConversation, recordEntry, type EntryInput } from './db.js';
 
 export async function handleTestCommand(bot: Bot, data: EntryInput): Promise<boolean> {
-  if (data.text !== '/test_id' && data.text !== '/test_reset') return false;
+  if (data.text !== '/test_id' && data.text !== '/test_reset' && data.text !== '/test_version') return false;
   const business = data.connectionId || undefined;
   const reply = (text:string) => bot.api.sendMessage(data.chatId,text,{business_connection_id:business});
   if (data.text === '/test_id') {
@@ -13,7 +14,12 @@ export async function handleTestCommand(bot: Bot, data: EntryInput): Promise<boo
   }
   if (!config.testerIds.has(data.userId) && data.userId !== config.adminId) {
     await recordEntry(data,null);
-    await reply(`Сброс доступен только тестовым аккаунтам. Ваш Telegram ID: ${data.userId}. Добавьте его в TESTER_TELEGRAM_IDS в настройках сервера.`);
+    await reply(`Команда доступна только тестовым аккаунтам. Ваш Telegram ID: ${data.userId}. Добавьте его в TESTER_TELEGRAM_IDS в настройках сервера.`);
+    return true;
+  }
+  if (data.text === '/test_version') {
+    await recordEntry(data,null);
+    await reply(`Версия бота: ${APP_VERSION}`);
     return true;
   }
   const result = await clearTestConversation(data);

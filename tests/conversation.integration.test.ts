@@ -41,13 +41,15 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
   let failManager = false;
   let missingPrompt = false;
   let failFirstGreeting = false;
+  let canDeleteBusiness = true;
+  let denyDeletion = false;
   const visible = new Map<number,any>();
   function makeBot() {
     const bot = createBot();
     bot.botInfo = {id:123456789,is_bot:true,first_name:'TENTMAX',username:'tentmax_test_bot',can_join_groups:false,can_read_all_group_messages:false,supports_inline_queries:false,can_connect_to_business:true,has_main_web_app:false};
     bot.api.config.use(async (_prev,method,payload:any) => {
       calls.push({method,payload});
-      if (method === 'getBusinessConnection') return {ok:true,result:{id:'business-test',user:{id:1,is_bot:false,first_name:'Company'},user_chat_id:1,date:1,is_enabled:true,rights:{can_reply:true}}} as any;
+      if (method === 'getBusinessConnection') return {ok:true,result:{id:'business-test',user:{id:1,is_bot:false,first_name:'Company'},user_chat_id:1,date:1,is_enabled:true,rights:{can_reply:true,...(canDeleteBusiness ? {can_delete_outgoing_messages:true} : {})}}} as any;
       if (method === 'sendMessage') {
         if (failFirstGreeting && payload.chat_id===42) { failFirstGreeting=false; return {ok:false,error_code:503,description:'Temporary Telegram outage'} as any; }
         if (failKeyboard && payload.business_connection_id && payload.reply_markup) return {ok:false,error_code:400,description:'Bad Request: reply markup not supported for business messages'} as any;
@@ -62,6 +64,10 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
         visible.set(payload.message_id,{...payload});
       }
       if (method === 'deleteMessage') visible.delete(payload.message_id);
+      if (method === 'deleteBusinessMessages') {
+        if (denyDeletion) return {ok:false,error_code:403,description:'Forbidden: deletion denied'} as any;
+        for (const id of payload.message_ids) visible.delete(id);
+      }
       if (method === 'editMessageReplyMarkup' && visible.has(payload.message_id)) visible.get(payload.message_id).reply_markup=payload.reply_markup;
       return {ok:true,result:true} as any;
     });
@@ -149,25 +155,56 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
     await Promise.all([click('warehouse',first),click('production',first)]);
     assert.equal((await lead()).revision,first.revision+1);
     await click('sport',first); assert.equal((await lead()).step,'city');
+    const aiCallsBeforeNoise = aiRequests.length;
+    // Even a permissive AI verdict must not allow repeated-letter noise.
+    aiMode = 'accept';
+    for (const noise of ['ggg','gggg']) {
+      await message(noise);
+      assert.equal((await lead()).step,'city');
+      assert.equal((await lead()).city,null);
+      assert.ok(visible.get((await lead()).prompt_message_id!).text.includes('Уточните город'));
+    }
+    assert.equal(aiRequests.length,aiCallsBeforeNoise);
+    aiMode = 'unavailable';
+    await message('фигня какая-то');
+    const failedPrompt = await lead();
+    assert.ok(visible.get(failedPrompt.prompt_message_id!).text.includes('Сейчас не получается проверить ответ'));
+    assert.notEqual(failedPrompt.prompt_message_id,first.prompt_message_id);
     aiMode = 'clarify';
-    await message('Продам велосипед');
+    await message('фигня какая-то');
     assert.equal((await lead()).step,'city');
     assert.equal((await lead()).city,null);
     aiMode = 'unavailable';
     await message('Казань');
     assert.equal((await lead()).step,'city');
     aiMode = 'accept';
-    await message('Казань');
-    assert.equal((await lead()).prompt_message_id,first.prompt_message_id);
-    assert.equal(calls.filter(c => c.method==='sendMessage' && c.payload.chat_id===42).length,1);
-    assert.equal(visible.get(first.prompt_message_id!).text.includes('ширина'),true);
-    assert.equal(visible.get(first.prompt_message_id!).text.includes('В каком городе'),false);
-    assert.equal(visible.get(first.prompt_message_id!).reply_markup.inline_keyboard.length,0);
+    await message('Москва');
+    const widthPrompt = await lead();
+    assert.equal(widthPrompt.city,'Москва');
+    assert.equal(widthPrompt.step,'width');
+    assert.notEqual(widthPrompt.prompt_message_id,first.prompt_message_id);
+    assert.equal(visible.has(first.prompt_message_id!),false);
+    assert.equal(visible.has(failedPrompt.prompt_message_id!),false);
+    assert.equal(visible.get(widthPrompt.prompt_message_id!).text.includes('ширина'),true);
+    assert.equal(visible.get(widthPrompt.prompt_message_id!).text.includes('проверить ответ'),false);
+    assert.equal(visible.get(widthPrompt.prompt_message_id!).reply_markup.inline_keyboard.length,0);
+    assert.ok(calls.some(c => c.method==='deleteBusinessMessages' && c.payload.business_connection_id==='business-test'));
+    // Without deletion rights the old question is collapsed, while the new
+    // clarification still follows the user's reply as a fresh message.
+    canDeleteBusiness = false;
     await message('0'); assert.equal((await lead()).step,'width');
+    assert.equal(visible.get(widthPrompt.prompt_message_id!).text,'Ответ получен.');
+    assert.notEqual((await lead()).prompt_message_id,widthPrompt.prompt_message_id);
+    canDeleteBusiness = true;
+    denyDeletion = true;
+    const protectedPrompt = await lead();
+    await message('0');
+    assert.equal(visible.get(protectedPrompt.prompt_message_id!).text,'Ответ получен.');
+    denyDeletion = false;
     await message('18,5');
     // Simulate process restart: nothing in memory is required to resume.
     bot = makeBot(); await message('/resume'); assert.equal((await lead()).step,'length');
-    assert.equal((await lead()).prompt_message_id,first.prompt_message_id);
+    assert.notEqual((await lead()).prompt_message_id,first.prompt_message_id);
     await message('40'); await message('6,2');
     await click('insulated');
     assert.equal((await lead()).step,'contact_name');
@@ -209,7 +246,7 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
     const notifications = calls.filter(c => c.method==='sendMessage' && c.payload.chat_id===9002);
     assert.equal(notifications.length,1);
     const notice = notifications[0].payload.text;
-    for (const part of ['Казань','22.5 м','40 м','6.2 м','Утеплённый','Александр','+79991234567','@client_test','Назначение:','rv-267087']) assert.ok(notice.includes(part),part);
+    for (const part of ['Москва','22.5 м','40 м','6.2 м','Утеплённый','Александр','+79991234567','@client_test','Назначение:','rv-267087']) assert.ok(notice.includes(part),part);
     assert.ok(!notice.includes('Сроки'));
     assert.ok(notifications[0].payload.reply_markup.inline_keyboard[0][0].callback_data.startsWith('accept:'));
     async function managerClick(id:number,action:string) {
@@ -306,6 +343,9 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
     await bot.handleUpdate({update_id:++updateId,message:{message_id:1,date:1,chat:{id:43,type:'private'},from:{id:43,is_bot:false,first_name:'Other'},text:'/test_reset'}} as any);
     assert.equal((await lead()).id,oldTest.id);
     assert.ok(calls.some(c => c.method==='sendMessage' && c.payload.chat_id===43 && c.payload.text.includes('тестовым аккаунтам')));
+    await message('/test_version');
+    assert.equal((await lead()).id,oldTest.id);
+    assert.ok(calls.some(c => c.method==='sendMessage' && c.payload.text==='Версия бота: tentmax-city-guard-2'));
     await message('/test_id');
     assert.equal((await lead()).id,oldTest.id);
     assert.ok(calls.some(c => c.method==='sendMessage' && c.payload.text.includes('Ваш Telegram ID: 42')));
