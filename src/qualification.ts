@@ -1,6 +1,6 @@
 import type { Lead, Step } from './db.js';
 
-export const PURPOSES = { warehouse: 'Склад', production: 'Производство', sport: 'Спортивный объект', agriculture: 'Сельское хозяйство', other: 'Другое' };
+export const PURPOSES = { warehouse: 'Склад', production: 'Производство', sport: 'Спортивный объект', padel: 'Падел-корты', agriculture: 'Сельское хозяйство', other: 'Другое' };
 export const INSULATION = { warm: 'Тёплый (2 слоя тента)', cold: 'Холодный', insulated: 'Утеплённый (2 слоя тента + утеплитель)', advice: 'Нужна консультация' };
 export const FIELDS = { purpose: 'Назначение', city: 'Город или регион', width: 'Ширина', length: 'Длина', wall_height: 'Высота прямой стены', insulation: 'Тип ангара', contact_name: 'Имя', phone: 'Телефон' };
 export type Field = keyof typeof FIELDS;
