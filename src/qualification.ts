@@ -5,8 +5,8 @@ export const INSULATION = { warm: 'Тёплый (2 слоя тента)', cold: 
 export const FIELDS = { purpose: 'Назначение', city: 'Город или регион', width: 'Ширина', length: 'Длина', wall_height: 'Высота прямой стены', insulation: 'Тип ангара', contact_name: 'Имя', phone: 'Телефон' };
 export type Field = keyof typeof FIELDS;
 export const ORDER = Object.keys(FIELDS) as Field[];
-export type Changes = Partial<Pick<Lead, Field | 'step' | 'status' | 'consent' | 'resume_step'>>;
-export type AnswerResult = { ok: true; update: Changes } | { ok: false; reply: string };
+export type Changes = Partial<Pick<Lead, Field | 'step' | 'status' | 'consent' | 'resume_step' | 'ai_approved'>>;
+export type AnswerResult = { ok: true; update: Changes; reply?: string } | { ok: false; reply: string };
 export const START_QUESTION = 'Здравствуйте! Вы обратились в TENTMAX. Поможем подобрать тентовое сооружение под вашу задачу. Для чего планируете использовать ангар?';
 
 export function summary(lead: Lead): string {
@@ -50,10 +50,7 @@ export function normalizePhone(raw: string): string | null {
   return /^\+?[1-9]\d{9,14}$/.test(value) ? (value.startsWith('+') ? value : `+${value}`) : null;
 }
 export function complete(lead: Lead): boolean {
-  return ORDER.every(field => typeof lead[field] === 'string' && !!lead[field]?.trim())
-    && !!normalizeDimension(lead.width ?? '') && !!normalizeDimension(lead.length ?? '') && !!normalizeDimension(lead.wall_height ?? '')
-    && !!normalizePhone(lead.phone ?? '')
-    && Object.values(PURPOSES).some(value => value === lead.purpose) && Object.values(INSULATION).some(value => value === lead.insulation);
+  return firstInvalidField(lead) === null;
 }
 
 export function evaluate(lead: Lead, raw: string, action?: string, contactPhone?: string): AnswerResult {
@@ -92,4 +89,14 @@ export function evaluate(lead: Lead, raw: string, action?: string, contactPhone?
   }
   const next = lead.resume_step && lead.resume_step !== field ? lead.resume_step : ORDER[ORDER.indexOf(field) + 1] ?? 'review';
   return {ok:true,update:{[field]:value,step:next,resume_step:null,consent:false}};
+}
+
+export function firstInvalidField(lead: Lead): Field | null {
+  for (const field of ORDER) {
+    const raw = lead[field] ?? '';
+    const options = field === 'purpose' ? PURPOSES : field === 'insulation' ? INSULATION : undefined;
+    const action = options ? Object.entries(options).find(([,label]) => label === raw)?.[0] : undefined;
+    if (!evaluate({...lead,step:field,resume_step:null},raw,action).ok) return field;
+  }
+  return null;
 }

@@ -35,6 +35,7 @@ export interface Lead {
   deadline: string | null;
   phone: string | null;
   consent: boolean;
+  ai_approved: boolean;
   step: Step;
   status: LeadStatus;
   assigned_manager_id: string | null;
@@ -95,6 +96,8 @@ export async function saveAnswer(lead: Lead, values: import('./qualification.js'
   const entries = allowed.filter(field => values[field] !== undefined).map(field => [field, values[field]] as const);
   const params: unknown[] = [lead.id, lead.revision, ...entries.map(([,value]) => value)];
   const assignments = entries.map(([field], i) => `${field}=$${i+3}`);
+  params.push(values.ai_approved === true && values.status === 'queued' && values.consent === true && values.step === 'done');
+  assignments.push(`ai_approved=$${params.length}`);
   if (messageId !== undefined) {
     params.push(messageId);
     assignments.push(`last_message_id=$${params.length}`);
@@ -106,7 +109,7 @@ export async function saveAnswer(lead: Lead, values: import('./qualification.js'
 
 export async function resetLead(lead: Lead, messageId: number): Promise<Lead | null> {
   const { rows } = await pool.query<Lead>(`UPDATE leads SET purpose=NULL,city=NULL,width=NULL,length=NULL,wall_height=NULL,
-    insulation=NULL,contact_name=NULL,deadline=NULL,phone=NULL,consent=FALSE,step='purpose',resume_step=NULL,
+    insulation=NULL,contact_name=NULL,deadline=NULL,phone=NULL,consent=FALSE,ai_approved=FALSE,step='purpose',resume_step=NULL,
     status='collecting',assigned_manager_id=NULL,tried_manager_ids='{}',notified_at=NULL,accepted_at=NULL,
     last_message_id=$3,revision=revision+1,updated_at=now()
     WHERE id=$1 AND revision=$2 AND status IN ('cancelled','needs_attention') AND last_message_id < $3 RETURNING *`,[lead.id,lead.revision,messageId]);
@@ -129,7 +132,7 @@ export async function claimLeadDispatch(leadId: string, managerId: string): Prom
   const { rows } = await pool.query<Lead>(
     `UPDATE leads SET status='dispatching',assigned_manager_id=$2,
      tried_manager_ids=array_append(tried_manager_ids,$2::bigint),updated_at=now()
-     WHERE id=$1 AND status='queued' RETURNING *`,
+     WHERE id=$1 AND status='queued' AND ai_approved=TRUE AND consent=TRUE RETURNING *`,
     [leadId, managerId],
   );
   return rows[0] ?? null;
@@ -214,16 +217,17 @@ export interface ConversationEntry {
   request_code: string | null;
 }
 
-export async function recordEntry(data: EntryInput, code: string | null): Promise<void> {
-  await pool.query(`INSERT INTO conversation_entries
+export async function recordEntry(data: EntryInput, code: string | null, client: Pick<pg.Pool,'query'> = pool): Promise<boolean> {
+  const result = await client.query(`INSERT INTO conversation_entries
     (business_connection_id,chat_id,user_id,client_name,username,message_id,message_text,request_code,start_after)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,CASE WHEN $8::text IS NULL THEN NULL ELSE now()+interval '3 minutes' END)
     ON CONFLICT (business_connection_id,chat_id) DO UPDATE SET
       user_id=EXCLUDED.user_id,client_name=EXCLUDED.client_name,username=EXCLUDED.username,
       message_id=EXCLUDED.message_id,message_text=EXCLUDED.message_text,
       request_code=EXCLUDED.request_code,start_after=EXCLUDED.start_after,received_at=now()
-    WHERE conversation_entries.message_id < EXCLUDED.message_id`,
+    WHERE conversation_entries.message_id < EXCLUDED.message_id RETURNING message_id`,
     [data.connectionId,data.chatId,data.userId,data.name,data.username ?? null,data.messageId,data.text,code]);
+  return !!result.rowCount;
 }
 
 export async function dueEntries(): Promise<ConversationEntry[]> {
@@ -267,4 +271,27 @@ export async function retryEntry(entry: ConversationEntry, leadId: string): Prom
 export async function finishEntry(entry: ConversationEntry): Promise<void> {
   await pool.query(`UPDATE conversation_entries SET start_after=NULL WHERE business_connection_id=$1 AND chat_id=$2 AND message_id=$3`,
     [entry.business_connection_id,entry.chat_id,entry.message_id]);
+}
+
+// Called only by the allowlisted test command. A new lead gets a new ID, so
+// manager buttons from an earlier test cannot act on a later test application.
+export async function clearTestConversation(data: EntryInput): Promise<{handled:boolean;lead:Lead | null}> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Lock the entry before the lead, matching activateEntry's lock order.
+    if (!await recordEntry(data,null,client)) { await client.query('ROLLBACK'); return {handled:false,lead:null}; }
+    const current = await client.query<Lead>(`SELECT * FROM leads WHERE business_connection_id=$1 AND client_chat_id=$2 FOR UPDATE`,[data.connectionId,data.chatId]);
+    const lead = current.rows[0];
+    if (lead && (lead.client_telegram_id !== String(data.userId) || Number(lead.last_message_id) >= data.messageId)) {
+      await client.query('ROLLBACK');
+      return {handled:false,lead:null};
+    }
+    const {rows} = await client.query<Lead>(`DELETE FROM leads WHERE business_connection_id=$1 AND client_chat_id=$2 AND client_telegram_id=$3 RETURNING *`,[data.connectionId,data.chatId,data.userId]);
+    await client.query('COMMIT');
+    return {handled:true,lead:rows[0] ?? null};
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
 }

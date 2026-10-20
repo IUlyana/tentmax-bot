@@ -89,3 +89,5 @@ CREATE TABLE IF NOT EXISTS conversation_entries (
   PRIMARY KEY (business_connection_id, chat_id)
 );
 CREATE INDEX IF NOT EXISTS conversation_entries_due_idx ON conversation_entries(start_after) WHERE start_after IS NOT NULL;
+
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS ai_approved BOOLEAN NOT NULL DEFAULT FALSE;
