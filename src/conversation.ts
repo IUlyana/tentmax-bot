@@ -2,6 +2,7 @@ import { Bot, GrammyError, InlineKeyboard, Keyboard } from 'grammy';
 import { recordEntry, findLead, getLead, getManager, pool, resetLead, saveAnswer, type Lead } from './db.js';
 import { choices, evaluate, prompt } from './qualification.js';
 import { validateAnswer } from './ai.js';
+import { handleTestCommand } from './testing.js';
 import { entryCode } from './entry-message.js';
 import { dispatchOne, recentCounts } from './dispatch.js';
 
@@ -64,6 +65,7 @@ export async function sendPrompt(bot: Bot, lead: Lead, prefix?: string): Promise
 }
 
 async function receive(bot: Bot, data: { connectionId:string; chatId:number; userId:number; name:string; username?:string; text:string; messageId:number; entryText?:string; contact?: {phone_number:string;user_id?:number} }): Promise<void> {
+  if (await handleTestCommand(bot,data)) return;
   const lead = await findLead(data.connectionId,data.chatId);
   if (!lead) {
     await recordEntry(data,entryCode(data.entryText ?? ''));
@@ -112,6 +114,7 @@ export function registerConversation(bot: Bot): void {
   bot.on('message',async ctx => {
     if (ctx.chat.type !== 'private' || ctx.from.is_bot) return;
     const text = (ctx.message.text ?? '').trim();
+    if (await handleTestCommand(bot,{connectionId:'',chatId:ctx.chat.id,userId:ctx.from.id,name:ctx.from.first_name,username:ctx.from.username,text,messageId:ctx.message.message_id})) return;
     const manager = await getManager(ctx.from.id);
     if (manager) {
       if (text === '/start') await ctx.reply(`Здравствуйте, ${manager.name}! Ваш Telegram ID: ${ctx.from.id}. Вы будете получать заявки TENTMAX. Статистика: /status.`);

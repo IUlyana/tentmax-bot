@@ -11,6 +11,7 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
   await admin.query(`CREATE SCHEMA ${schema}`);
   url.searchParams.set('options',`-c search_path=${schema}`);
   process.env.DATABASE_URL = url.toString();
+  process.env.TESTER_TELEGRAM_IDS = '42';
   process.env.AI_API_KEY = 'offline-ai-fixture';
   let aiMode: 'accept' | 'clarify' | 'unavailable' = 'accept';
   let aiField = 'city';
@@ -298,6 +299,49 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
     assert.equal((await db.getLead(noConsent.id))?.status,'collecting');
     assert.equal((await db.getLead(noConsent.id))?.step,'review');
     assert.equal((await db.getLead(noConsent.id))?.ai_approved,false);
+    // Reset is allowlisted and scoped to the caller's current test chat.
+    const preservedDirect = await db.findLead('',42);
+    const oldTest = await lead();
+    await db.pool.query(`UPDATE leads SET status='accepted' WHERE id=$1`,[oldTest.id]);
+    await bot.handleUpdate({update_id:++updateId,message:{message_id:1,date:1,chat:{id:43,type:'private'},from:{id:43,is_bot:false,first_name:'Other'},text:'/test_reset'}} as any);
+    assert.equal((await lead()).id,oldTest.id);
+    assert.ok(calls.some(c => c.method==='sendMessage' && c.payload.chat_id===43 && c.payload.text.includes('тестовым аккаунтам')));
+    await message('/test_id');
+    assert.equal((await lead()).id,oldTest.id);
+    assert.ok(calls.some(c => c.method==='sendMessage' && c.payload.text.includes('Ваш Telegram ID: 42')));
+    await message('/test_reset');
+    const resetMessageId = messageId;
+    assert.equal(await db.findLead('business-test',42),null);
+    assert.equal((await db.findLead('',42))?.id,preservedDirect?.id);
+    assert.equal((await db.getLead(accepted))?.status,'accepted'); // Another client untouched.
+    assert.equal(await db.acceptLead(oldTest.id,'9002'),null);
+    await click('warehouse',oldTest);
+    assert.equal(await db.findLead('business-test',42),null);
+    await message('Здравствуйте');
+    await expireEntry(); await startDueConversations(bot);
+    assert.equal(await db.findLead('business-test',42),null);
+    await message(trigger);
+    await expireEntry(); await startDueConversations(bot);
+    const newTest = await lead();
+    assert.notEqual(newTest.id,oldTest.id);
+    assert.equal(newTest.city,null);
+    assert.equal(newTest.ai_approved,false);
+    await message('/test_reset',undefined,true,resetMessageId); // Replayed reset cannot delete a new form.
+    assert.equal((await lead()).id,newTest.id);
+    await click('warehouse',oldTest); // Old client keyboard cannot update the new ID.
+    assert.equal((await lead()).step,'purpose');
+    await message('/test_reset');
+    await message(trigger); // A reset also cancels an entry still waiting for silence.
+    await expireEntry();
+    const pendingTest = (await db.dueEntries()).find(entry => entry.chat_id==='42' && entry.business_connection_id==='business-test');
+    assert.ok(pendingTest);
+    await message('/test_reset');
+    assert.equal(await db.activateEntry(pendingTest),null);
+    assert.equal(await db.findLead('business-test',42),null);
+    // Direct reset removes the phone reply keyboard and leaves other chats intact.
+    await message('/test_reset',undefined,false);
+    assert.equal(await db.findLead('',42),null);
+    assert.ok(calls.some(c => c.method==='sendMessage' && c.payload.text.includes('Тестовая анкета') && c.payload.reply_markup?.remove_keyboard));
     for (const request of aiRequests) {
       const fields = JSON.parse(request.messages[1].content);
       for (const privateField of ['phone','client_telegram_id','client_username','first_message']) assert.equal(fields[privateField],undefined);

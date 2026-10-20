@@ -41,9 +41,15 @@ function loadManagers(): ManagerConfig[] {
 const adminString = process.env.ADMIN_TELEGRAM_ID?.trim();
 if (adminString && !/^\d+$/.test(adminString)) throw new Error('ADMIN_TELEGRAM_ID must be numeric');
 
+const testerIds = (process.env.TESTER_TELEGRAM_IDS ?? '').split(',').map(value => value.trim()).filter(Boolean);
+if (testerIds.some(value => !/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value)))) {
+  throw new Error('TESTER_TELEGRAM_IDS must contain comma-separated numeric Telegram IDs');
+}
+
 export const config = {
   token: required('BOT_TOKEN'),
   databaseUrl: required('DATABASE_URL'),
   managers: loadManagers(),
   adminId: adminString ? Number(adminString) : undefined,
+  testerIds: new Set(testerIds.map(Number)),
 };
