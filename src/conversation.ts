@@ -12,17 +12,44 @@ export async function sendPrompt(bot: Bot, lead: Lead, prefix?: string): Promise
   const options = choices(lead);
   const keyboard = new InlineKeyboard();
   for (const [label, action] of options) keyboard.text(label, callbackData(lead, action)).row();
-  if (lead.status === 'collecting' && lead.step !== 'edit' && lead.step !== 'review') keyboard.text('Изменить данные', callbackData(lead, 'edit'));
   let text = [prefix, prompt(lead)].filter(Boolean).join('\n\n');
-  if (lead.step === 'phone') text += business ? '\nВ этом чате номер нужно ввести вручную. Изменить ответы: /edit.' : '\nМожно поделиться контактом кнопкой ниже или ввести номер вручную. Изменить ответы: /edit.';
-  const fallback = lead.text_choices && business;
+  if (lead.step === 'phone') text += business ? '\nВ этом чате номер нужно ввести вручную.' : '\nМожно поделиться контактом кнопкой ниже или ввести номер вручную.';
+  const fallback = !!(lead.text_choices && business);
   if (fallback && options.length) text += '\n\n' + options.map(([label]) => `• ${label}`).join('\n') + '\nНапишите название подходящего варианта.';
-  if (fallback && lead.status === 'collecting') text += '\nИзменить ответы: /edit. Продолжить позже: /resume.';
-  const markup = !business && lead.step === 'phone'
-    ? new Keyboard().requestContact('Поделиться номером телефона').resized().oneTime()
-    : fallback ? undefined : keyboard.inline_keyboard.length ? keyboard : (!business ? { remove_keyboard: true as const } : undefined);
+  const replyKeyboard = !business && lead.step === 'phone';
+  const inlineMarkup = fallback ? undefined : {inline_keyboard: keyboard.inline_keyboard.filter(row => row.length > 0)};
   try {
-    await bot.api.sendMessage(Number(lead.client_chat_id), text, {business_connection_id:business,reply_markup:markup});
+    // Keep a single question message, including after restart or /resume.
+    // Reply keyboards can only be sent in new messages, so direct-chat contact
+    // requests are replaced separately and the old bot prompt is removed.
+    if (lead.prompt_message_id && !replyKeyboard && !lead.prompt_has_reply_keyboard) {
+      try {
+        await bot.api.editMessageText(Number(lead.client_chat_id), lead.prompt_message_id, text, {
+          business_connection_id: business, reply_markup: inlineMarkup,
+        });
+        return;
+      } catch (error) {
+        if (error instanceof GrammyError && error.error_code === 400 && /message is not modified/i.test(error.description)) return;
+        if (!(error instanceof GrammyError && error.error_code === 400 && /message to edit not found|message can't be edited|message can not be edited|message_id_invalid/i.test(error.description))) throw error;
+        // A manually deleted or expired prompt must not prevent continuation.
+      }
+    }
+    const markup = replyKeyboard
+      ? new Keyboard().requestContact('Поделиться номером телефона').resized().oneTime()
+      : !business && lead.prompt_has_reply_keyboard ? {remove_keyboard: true as const}
+      : inlineMarkup;
+    const sent = await bot.api.sendMessage(Number(lead.client_chat_id), text, {business_connection_id: business, reply_markup: markup});
+    await pool.query('UPDATE leads SET prompt_message_id=$2,prompt_has_reply_keyboard=$3 WHERE id=$1 AND revision=$4',
+      [lead.id,sent.message_id,replyKeyboard,lead.revision]);
+    if (!business && lead.prompt_has_reply_keyboard && !replyKeyboard) {
+      // Removing the contact keyboard and attaching inline choices require
+      // separate API calls, but still use the same new question message.
+      await bot.api.editMessageReplyMarkup(Number(lead.client_chat_id),sent.message_id,{reply_markup:inlineMarkup});
+    }
+    // Deleting our own direct-chat prompts needs no Business deletion rights.
+    if (!business && lead.prompt_message_id) {
+      await bot.api.deleteMessage(Number(lead.client_chat_id),lead.prompt_message_id).catch(() => {});
+    }
   } catch (error) {
     // Retry only a confirmed unsupported keyboard, never general auth/network errors.
     if (business && !fallback && error instanceof GrammyError && error.error_code === 400 && /(?:button|keyboard|reply.?markup).*(?:unsupported|not supported|not allowed)|(?:unsupported|not supported|not allowed).*(?:button|keyboard|reply.?markup)/i.test(error.description)) {
@@ -113,14 +140,13 @@ export function registerConversation(bot: Bot): void {
       await ctx.answerCallbackQuery({text:'Этот ответ уже учтён. Используйте последнее сообщение или /resume.'}); return;
     }
     // Only buttons actually offered at this step may act on the form.
-    const offered = choices(lead).some(([,key]) => key === action) || (action === 'edit' && lead.step !== 'edit');
+    const offered = choices(lead).some(([,key]) => key === action);
     if (!offered) { await ctx.answerCallbackQuery({text:'Используйте кнопки текущего вопроса.'}); return; }
     const result = evaluate(lead,'',action);
     if (!result.ok) { await ctx.answerCallbackQuery({text:result.reply}); return; }
     const saved = await saveAnswer(lead,result.update);
     await ctx.answerCallbackQuery({text:saved ? undefined : 'Этот ответ уже учтён.'});
     if (!saved) return;
-    await bot.api.editMessageReplyMarkup(msg.chat.id,msg.message_id,{business_connection_id:lead.business_connection_id || undefined,reply_markup:{inline_keyboard:[]}}).catch(() => {});
     await sendPrompt(bot,saved);
     if (saved.status === 'queued') await dispatchOne(bot,saved.id);
   });

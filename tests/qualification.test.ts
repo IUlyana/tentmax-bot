@@ -59,3 +59,8 @@ test('city and name validate input and review cannot send incomplete data',() =>
   assert.ok(!prompt({...sample(),step:'review'}).includes('Сроки'));
   assert.ok(!choices({...sample(),step:'edit'}).some(([,action]) => action === 'field_deadline'));
 });
+
+test('correction button is offered only after the questionnaire is complete', () => {
+  for (const step of ORDER) assert.ok(!choices({...sample(),step}).some(([,action]) => action === 'edit'));
+  assert.deepEqual(choices({...sample(),step:'review'}).find(([,action]) => action === 'edit'),['Исправить ответы','edit']);
+});

@@ -22,6 +22,8 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
   let updateId = 0;
   let failKeyboard = false;
   let failManager = false;
+  let missingPrompt = false;
+  const visible = new Map<number,any>();
   function makeBot() {
     const bot = createBot();
     bot.botInfo = {id:123456789,is_bot:true,first_name:'TENTMAX',username:'tentmax_test_bot',can_join_groups:false,can_read_all_group_messages:false,supports_inline_queries:false,can_connect_to_business:true,has_main_web_app:false};
@@ -31,8 +33,17 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
       if (method === 'sendMessage') {
         if (failKeyboard && payload.business_connection_id && payload.reply_markup) return {ok:false,error_code:400,description:'Bad Request: reply markup not supported for business messages'} as any;
         if (failManager && payload.chat_id === 9001) return {ok:false,error_code:403,description:'Forbidden: bot was blocked by the user'} as any;
-        return {ok:true,result:{message_id:++outgoingId,date:1,chat:{id:payload.chat_id,type:'private'},text:payload.text,business_connection_id:payload.business_connection_id}} as any;
+        const result = {message_id:++outgoingId,date:1,chat:{id:payload.chat_id,type:'private'},text:payload.text,business_connection_id:payload.business_connection_id};
+        visible.set(result.message_id,{...payload});
+        return {ok:true,result} as any;
       }
+      if (method === 'editMessageText') {
+        if (missingPrompt) { missingPrompt=false; visible.delete(payload.message_id); return {ok:false,error_code:400,description:'Bad Request: message to edit not found'} as any; }
+        if (failKeyboard && payload.business_connection_id && payload.reply_markup?.inline_keyboard?.length) return {ok:false,error_code:400,description:'Bad Request: reply markup not supported for business messages'} as any;
+        visible.set(payload.message_id,{...payload});
+      }
+      if (method === 'deleteMessage') visible.delete(payload.message_id);
+      if (method === 'editMessageReplyMarkup' && visible.has(payload.message_id)) visible.get(payload.message_id).reply_markup=payload.reply_markup;
       return {ok:true,result:true} as any;
     });
     // Surface errors to the test instead of the production logging handler.
@@ -49,7 +60,7 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
   async function lead() { const result = await db.findLead('business-test',42); assert.ok(result); return result; }
   async function click(action:string, snapshot?:Awaited<ReturnType<typeof lead>>, actor=42) {
     const current = snapshot ?? await lead();
-    await bot.handleUpdate({update_id:++updateId,callback_query:{id:String(updateId),from:{...from,id:actor},chat_instance:'test',data:callbackData(current,action),message:{message_id:outgoingId,date:1,chat:{id:42,type:'private'},...(current.business_connection_id ? {business_connection_id:current.business_connection_id} : {})}}} as any);
+    await bot.handleUpdate({update_id:++updateId,callback_query:{id:String(updateId),from:{...from,id:actor},chat_instance:'test',data:callbackData(current,action),message:{message_id:current.prompt_message_id ?? outgoingId,date:1,chat:{id:42,type:'private'},...(current.business_connection_id ? {business_connection_id:current.business_connection_id} : {})}}} as any);
   }
   try {
     // Simulate an existing installation and verify the additive migration twice.
@@ -83,20 +94,28 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
     assert.equal((await lead()).revision,first.revision+1);
     await click('sport',first); assert.equal((await lead()).step,'city');
     await message('Казань');
+    assert.equal((await lead()).prompt_message_id,first.prompt_message_id);
+    assert.equal(calls.filter(c => c.method==='sendMessage' && c.payload.chat_id===42).length,1);
+    assert.equal(visible.get(first.prompt_message_id!).text.includes('ширина'),true);
+    assert.equal(visible.get(first.prompt_message_id!).text.includes('В каком городе'),false);
+    assert.equal(visible.get(first.prompt_message_id!).reply_markup.inline_keyboard.length,0);
     await message('0'); assert.equal((await lead()).step,'width');
     await message('18,5');
     // Simulate process restart: nothing in memory is required to resume.
     bot = makeBot(); await message('/resume'); assert.equal((await lead()).step,'length');
+    assert.equal((await lead()).prompt_message_id,first.prompt_message_id);
     await message('40'); await message('6,2');
     await click('insulated');
     assert.equal((await lead()).step,'contact_name');
     await message('Александр');
     const phoneLead = await lead(); assert.equal(phoneLead.step,'phone');
-    const phonePrompt = calls.filter(c => c.method==='sendMessage' && c.payload.text.includes('Оставьте номер')).at(-1)!;
+    const phonePrompt = calls.filter(c => ['sendMessage','editMessageText'].includes(c.method) && c.payload.text.includes('Оставьте номер')).at(-1)!;
     assert.equal(phonePrompt.payload.reply_markup?.keyboard,undefined);
     await message(undefined,{phone_number:'79991234567',first_name:'Чужой',user_id:43}); assert.equal((await lead()).step,'phone');
     await message('+7 (999) 123-45-67'); assert.equal((await lead()).step,'review');
-    assert.ok(calls.some(c => c.method==='editMessageReplyMarkup' && c.payload.business_connection_id==='business-test'));
+    assert.ok(calls.some(c => c.method==='editMessageText' && c.payload.business_connection_id==='business-test'));
+    const reviewPrompt = visible.get((await lead()).prompt_message_id!);
+    assert.ok(reviewPrompt.reply_markup.inline_keyboard.flat().some((button:any) => button.text==='Исправить ответы'));
     const beforeEdit = await lead();
     await click('edit'); await click('field_width'); await message('22,5');
     assert.equal((await lead()).step,'review'); assert.equal((await lead()).width,'22.5');
@@ -122,13 +141,20 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
     // Direct chat supports request_contact and own contact submission.
     await message('/request',undefined,false);
     const direct = await db.findLead('',42); assert.ok(direct);
+    missingPrompt = true;
     await click('sport',direct);
     assert.equal((await db.findLead('',42))?.purpose,'Спортивный объект');
+    assert.notEqual((await db.findLead('',42))?.prompt_message_id,direct.prompt_message_id);
     await db.pool.query(`UPDATE leads SET step='phone' WHERE id=$1`,[direct.id]);
     await message('/resume',undefined,false);
     assert.ok(calls.some(c => c.method==='sendMessage' && c.payload.reply_markup?.keyboard?.[0]?.[0]?.request_contact));
     await message(undefined,{phone_number:'79997654321',first_name:'Клиент',user_id:42},false);
-    assert.equal((await db.findLead('',42))?.phone,'+79997654321');
+    const directReview = await db.findLead('',42);
+    assert.equal(directReview?.phone,'+79997654321');
+    const directVisible = [...visible.values()].filter(msg => msg.chat_id===42 && !msg.business_connection_id);
+    assert.equal(directVisible.length,1);
+    assert.ok(visible.get(directReview!.prompt_message_id!).reply_markup.inline_keyboard.flat().some((button:any) => button.text==='Исправить ответы'));
+    assert.ok(calls.some(c => c.method==='deleteMessage'));
     // Unsupported business keyboards switch to persistent, label-based fallback.
     await db.pool.query(`UPDATE leads SET status='cancelled' WHERE id=$1`,[sent.id]);
     failKeyboard = true; await message('/new');

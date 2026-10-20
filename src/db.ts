@@ -20,6 +20,8 @@ export interface Lead {
   revision: number;
   resume_step: Step | null;
   text_choices: boolean;
+  prompt_message_id: number | null;
+  prompt_has_reply_keyboard: boolean;
   business_connection_id: string;
   client_chat_id: string;
   client_telegram_id: string;

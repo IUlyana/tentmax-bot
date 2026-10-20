@@ -24,7 +24,7 @@ export function prompt(lead: Lead): string {
     contact_name: 'Как к вам обращаться?',
     phone: 'Оставьте номер телефона, по которому менеджер сможет обсудить с вами проект. Например, +79991234567.',
     review: `Проверьте, пожалуйста, данные:\n\n${summary(lead)}\n\nМожно изменить любой ответ. Отправляя заявку, вы соглашаетесь передать эти данные и ваш Telegram-контакт менеджеру TENTMAX для обсуждения проекта.`,
-    edit: 'Что хотите изменить?',
+    edit: 'Какой из предыдущих ответов нужно исправить?',
     done: lead.status === 'cancelled' ? 'Заявка не отправлена. Если захотите вернуться к обсуждению, напишите /new.' : 'Спасибо! Передали вашу заявку менеджеру TENTMAX. Он свяжется с вами, чтобы обсудить детали.',
   };
   return prompts[lead.step];
@@ -33,7 +33,7 @@ export function prompt(lead: Lead): string {
 export function choices(lead: Lead): [string,string][] {
   if (lead.step === 'purpose') return Object.entries(PURPOSES).map(([key,label]) => [label, key]);
   if (lead.step === 'insulation') return Object.entries(INSULATION).map(([key,label]) => [label, key]);
-  if (lead.step === 'review') return [['Отправить заявку', 'send'], ['Изменить данные', 'edit'], ['Не отправлять', 'cancel']];
+  if (lead.step === 'review') return [['Отправить заявку', 'send'], ['Исправить ответы', 'edit'], ['Не отправлять', 'cancel']];
   if (lead.step === 'edit') return [...ORDER.map((field): [string,string] => [FIELDS[field], `field_${field}`]), ['Вернуться', 'resume']];
   return [];
 }
