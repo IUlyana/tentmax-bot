@@ -175,10 +175,13 @@ export async function declineLead(leadId: string, managerId: string): Promise<Le
   return rows[0] ?? null;
 }
 
-export async function recycleExpired(): Promise<void> {
+export async function recycleExpired(asOf?: Date): Promise<void> {
   await pool.query(
     `UPDATE leads SET status='queued',assigned_manager_id=NULL,notified_at=NULL,updated_at=now()
-     WHERE status='notified' AND notified_at < now() - interval '30 minutes'`,
+     WHERE status='notified'
+       AND (notified_at AT TIME ZONE 'Europe/Moscow')::date
+         < (COALESCE($1::timestamptz,now()) AT TIME ZONE 'Europe/Moscow')::date`,
+    [asOf ?? null],
   );
   await pool.query(
     `UPDATE leads SET status='queued',assigned_manager_id=NULL,updated_at=now()

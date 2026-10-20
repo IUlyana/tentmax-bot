@@ -12,6 +12,7 @@ export function renderLead(lead: Lead): string {
     `Telegram: ${username}`,
     `Telegram ID: ${lead.client_telegram_id}`,
     `Согласие на передачу: ${lead.consent ? 'получено' : 'не получено'}`,
+    'Пожалуйста, примите заявку до конца дня по московскому времени. Без ответа она будет передана следующему менеджеру. Если не можете принять, нажмите кнопку отказа.',
     ...(!lead.purpose ? [`Архивная заявка: ${lead.service ?? '—'}; ${lead.description ?? '—'}; бюджет: ${lead.budget ?? '—'}`, `Имя Telegram: ${lead.client_name}`] : []),
   ].join('\n');
 }

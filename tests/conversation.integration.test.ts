@@ -213,6 +213,36 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
     const revision = (await lead()).revision;
     await message('Москва',undefined,true,messageId); // replay of the last input
     assert.equal((await lead()).revision,revision);
+    // The manager has the whole Moscow calendar day, independent of the host
+    // timezone and the notification's age. Boundaries use a deterministic clock.
+    const {dispatchOne} = await import('../src/dispatch.js');
+    async function notifiedCase(chatId:number, notifiedAt:string, status='notified') {
+      const {lead:item} = await db.createLead({connectionId:'deadline-test',chatId,userId:chatId,name:'Test',messageId:1});
+      await db.pool.query(`UPDATE leads SET status=$2,notified_at=$3,assigned_manager_id=9001,tried_manager_ids='{9001}' WHERE id=$1`,[item.id,status,notifiedAt]);
+      return item.id;
+    }
+    const morning = await notifiedCase(1001,'2026-10-20T06:00:00Z');
+    const lastMinute = await notifiedCase(1002,'2026-10-20T20:59:30Z');
+    const followingDay = await notifiedCase(1003,'2026-10-20T21:01:00Z');
+    const accepted = await notifiedCase(1004,'2026-10-19T06:00:00Z','accepted');
+    await db.recycleExpired(new Date('2026-10-20T20:59:59.999Z'));
+    assert.equal((await db.getLead(morning))?.status,'notified'); // More than 30 minutes old.
+    assert.equal((await db.getLead(lastMinute))?.status,'notified');
+    await db.recycleExpired(new Date('2026-10-20T21:00:00Z')); // Midnight in Moscow.
+    assert.equal((await db.getLead(morning))?.status,'queued');
+    assert.equal((await db.getLead(lastMinute))?.status,'queued'); // Only 30 seconds old.
+    assert.equal((await db.getLead(lastMinute))?.assigned_manager_id,null);
+    assert.deepEqual((await db.getLead(lastMinute))?.tried_manager_ids,['9001']);
+    assert.equal((await db.getLead(followingDay))?.status,'notified');
+    assert.equal((await db.getLead(accepted))?.status,'accepted');
+    await dispatchOne(bot,lastMinute);
+    assert.equal((await db.getLead(lastMinute))?.assigned_manager_id,'9002');
+    assert.equal((await db.getLead(lastMinute))?.status,'notified');
+    // Explicit refusal still transfers immediately within the same day.
+    assert.ok(await db.declineLead(followingDay,'9001'));
+    await dispatchOne(bot,followingDay);
+    assert.equal((await db.getLead(followingDay))?.assigned_manager_id,'9002');
+
   } finally {
     await db.pool.end();
     await admin.query(`DROP SCHEMA ${schema} CASCADE`);
