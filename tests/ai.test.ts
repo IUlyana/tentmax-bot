@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { checkSemantics, semanticInput } from '../src/ai.js';
+import { checkSemantics as rawCheckSemantics, semanticInput } from '../src/ai.js';
 import type { Lead } from '../src/db.js';
+
+const checkSemantics: typeof rawCheckSemantics = (input,options) => rawCheckSemantics(input,{onFailure:()=>{},...options});
 
 function response(content:unknown,finish_reason='stop') {
   return Response.json({choices:[{finish_reason,message:{content:JSON.stringify(content)}}]});
@@ -53,4 +55,19 @@ test('AI requests have a timeout and cannot hang the conversation',async () => {
 test('final semantic input excludes phone and Telegram metadata',() => {
   const fields=semanticInput({city:'Казань',contact_name:'Александр',width:'20',phone:'+79991234567',client_telegram_id:'42',client_username:'client',first_message:'private text'} as Lead);
   assert.deepEqual(fields,{city:'Казань',contact_name:'Александр',width:'20'});
+});
+
+test('OpenAI failure diagnostics expose status and safe codes without echoing credentials or customer data',async () => {
+  const diagnostics: unknown[]=[];
+  const result=await checkSemantics({city:'private customer text'},{apiKey:'private-test-key',onFailure:info=>diagnostics.push(info),fetch:async () => Response.json({error:{code:'invalid_api_key',message:'Incorrect key private-test-key; private customer text'}},{status:401})});
+  assert.equal(result.decision,'unavailable');
+  assert.deepEqual(diagnostics,[{reason:'http_error',status:401,code:'invalid_api_key'}]);
+  assert.ok(!JSON.stringify(diagnostics).includes('private'));
+});
+test('API keys are trimmed before constructing the Authorization header',async () => {
+  const result=await checkSemantics({city:'Москва'},{apiKey:' test-key \n',fetch:async (_url,options) => {
+    assert.equal((options!.headers as Record<string,string>).Authorization,'Bearer test-key');
+    return response({decision:'accept',field:null});
+  }});
+  assert.equal(result.decision,'accept');
 });
