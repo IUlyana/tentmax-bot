@@ -155,6 +155,16 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
     await Promise.all([click('warehouse',first),click('production',first)]);
     assert.equal((await lead()).revision,first.revision+1);
     await click('sport',first); assert.equal((await lead()).step,'city');
+    const aiCallsBeforeNoise = aiRequests.length;
+    // Even a permissive AI verdict must not allow repeated-letter noise.
+    aiMode = 'accept';
+    for (const noise of ['ggg','gggg']) {
+      await message(noise);
+      assert.equal((await lead()).step,'city');
+      assert.equal((await lead()).city,null);
+      assert.ok(visible.get((await lead()).prompt_message_id!).text.includes('Уточните город'));
+    }
+    assert.equal(aiRequests.length,aiCallsBeforeNoise);
     aiMode = 'unavailable';
     await message('фигня какая-то');
     const failedPrompt = await lead();
@@ -333,6 +343,9 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
     await bot.handleUpdate({update_id:++updateId,message:{message_id:1,date:1,chat:{id:43,type:'private'},from:{id:43,is_bot:false,first_name:'Other'},text:'/test_reset'}} as any);
     assert.equal((await lead()).id,oldTest.id);
     assert.ok(calls.some(c => c.method==='sendMessage' && c.payload.chat_id===43 && c.payload.text.includes('тестовым аккаунтам')));
+    await message('/test_version');
+    assert.equal((await lead()).id,oldTest.id);
+    assert.ok(calls.some(c => c.method==='sendMessage' && c.payload.text==='Версия бота: tentmax-city-guard-2'));
     await message('/test_id');
     assert.equal((await lead()).id,oldTest.id);
     assert.ok(calls.some(c => c.method==='sendMessage' && c.payload.text.includes('Ваш Telegram ID: 42')));

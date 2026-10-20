@@ -1,4 +1,5 @@
 import { startDueConversations } from './entry.js';
+import { APP_VERSION } from './version.js';
 import { createBot } from './bot.js';
 import { initDb, pool } from './db.js';
 import { dispatchQueued } from './dispatch.js';
@@ -26,7 +27,7 @@ async function main(): Promise<void> {
   entryWarmup.unref();
   process.once('SIGINT', () => { clearInterval(timer); clearInterval(entryTimer); clearTimeout(entryWarmup); void bot.stop(); });
   process.once('SIGTERM', () => { clearInterval(timer); clearInterval(entryTimer); clearTimeout(entryWarmup); void bot.stop(); });
-  console.info('Lead qualification bot started');
+  console.info(`Lead qualification bot started (${APP_VERSION})`);
   await bot.start({ allowed_updates: ['business_connection', 'business_message', 'message', 'callback_query'] });
   await pool.end();
 }
