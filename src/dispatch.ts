@@ -7,10 +7,12 @@ export function renderLead(lead: Lead): string {
   const username = lead.client_username ? `@${lead.client_username} — https://t.me/${lead.client_username}` : 'не установлен';
   return [
     `📥 Новая заявка TENTMAX #${lead.id}`,
+    ...(lead.request_code ? [`Номер обращения: ${lead.request_code}`] : []),
     summary(lead),
     `Telegram: ${username}`,
     `Telegram ID: ${lead.client_telegram_id}`,
     `Согласие на передачу: ${lead.consent ? 'получено' : 'не получено'}`,
+    'Пожалуйста, примите заявку до конца дня по московскому времени. Без ответа она будет передана следующему менеджеру. Если не можете принять, нажмите кнопку отказа.',
     ...(!lead.purpose ? [`Архивная заявка: ${lead.service ?? '—'}; ${lead.description ?? '—'}; бюджет: ${lead.budget ?? '—'}`, `Имя Telegram: ${lead.client_name}`] : []),
   ].join('\n');
 }

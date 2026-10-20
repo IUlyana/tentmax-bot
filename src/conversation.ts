@@ -1,6 +1,7 @@
 import { Bot, GrammyError, InlineKeyboard, Keyboard } from 'grammy';
-import { createLead, findLead, getLead, getManager, pool, resetLead, saveAnswer, type Lead } from './db.js';
+import { recordEntry, findLead, getLead, getManager, pool, resetLead, saveAnswer, type Lead } from './db.js';
 import { choices, evaluate, prompt } from './qualification.js';
+import { entryCode } from './entry-message.js';
 import { dispatchOne, recentCounts } from './dispatch.js';
 
 export function callbackData(lead: Lead, action: string): string {
@@ -12,17 +13,44 @@ export async function sendPrompt(bot: Bot, lead: Lead, prefix?: string): Promise
   const options = choices(lead);
   const keyboard = new InlineKeyboard();
   for (const [label, action] of options) keyboard.text(label, callbackData(lead, action)).row();
-  if (lead.status === 'collecting' && lead.step !== 'edit' && lead.step !== 'review') keyboard.text('Изменить данные', callbackData(lead, 'edit'));
   let text = [prefix, prompt(lead)].filter(Boolean).join('\n\n');
-  if (lead.step === 'phone') text += business ? '\nВ этом чате номер нужно ввести вручную. Изменить ответы: /edit.' : '\nМожно поделиться контактом кнопкой ниже или ввести номер вручную. Изменить ответы: /edit.';
-  const fallback = lead.text_choices && business;
+  if (lead.step === 'phone') text += business ? '\nВ этом чате номер нужно ввести вручную.' : '\nМожно поделиться контактом кнопкой ниже или ввести номер вручную.';
+  const fallback = !!(lead.text_choices && business);
   if (fallback && options.length) text += '\n\n' + options.map(([label]) => `• ${label}`).join('\n') + '\nНапишите название подходящего варианта.';
-  if (fallback && lead.status === 'collecting') text += '\nИзменить ответы: /edit. Продолжить позже: /resume.';
-  const markup = !business && lead.step === 'phone'
-    ? new Keyboard().requestContact('Поделиться номером телефона').resized().oneTime()
-    : fallback ? undefined : keyboard.inline_keyboard.length ? keyboard : (!business ? { remove_keyboard: true as const } : undefined);
+  const replyKeyboard = !business && lead.step === 'phone';
+  const inlineMarkup = fallback ? undefined : {inline_keyboard: keyboard.inline_keyboard.filter(row => row.length > 0)};
   try {
-    await bot.api.sendMessage(Number(lead.client_chat_id), text, {business_connection_id:business,reply_markup:markup});
+    // Keep a single question message, including after restart or /resume.
+    // Reply keyboards can only be sent in new messages, so direct-chat contact
+    // requests are replaced separately and the old bot prompt is removed.
+    if (lead.prompt_message_id && !replyKeyboard && !lead.prompt_has_reply_keyboard) {
+      try {
+        await bot.api.editMessageText(Number(lead.client_chat_id), lead.prompt_message_id, text, {
+          business_connection_id: business, reply_markup: inlineMarkup,
+        });
+        return;
+      } catch (error) {
+        if (error instanceof GrammyError && error.error_code === 400 && /message is not modified/i.test(error.description)) return;
+        if (!(error instanceof GrammyError && error.error_code === 400 && /message to edit not found|message can't be edited|message can not be edited|message_id_invalid/i.test(error.description))) throw error;
+        // A manually deleted or expired prompt must not prevent continuation.
+      }
+    }
+    const markup = replyKeyboard
+      ? new Keyboard().requestContact('Поделиться номером телефона').resized().oneTime()
+      : !business && lead.prompt_has_reply_keyboard ? {remove_keyboard: true as const}
+      : inlineMarkup;
+    const sent = await bot.api.sendMessage(Number(lead.client_chat_id), text, {business_connection_id: business, reply_markup: markup});
+    await pool.query('UPDATE leads SET prompt_message_id=$2,prompt_has_reply_keyboard=$3 WHERE id=$1 AND revision=$4',
+      [lead.id,sent.message_id,replyKeyboard,lead.revision]);
+    if (!business && lead.prompt_has_reply_keyboard && !replyKeyboard) {
+      // Removing the contact keyboard and attaching inline choices require
+      // separate API calls, but still use the same new question message.
+      await bot.api.editMessageReplyMarkup(Number(lead.client_chat_id),sent.message_id,{reply_markup:inlineMarkup});
+    }
+    // Deleting our own direct-chat prompts needs no Business deletion rights.
+    if (!business && lead.prompt_message_id) {
+      await bot.api.deleteMessage(Number(lead.client_chat_id),lead.prompt_message_id).catch(() => {});
+    }
   } catch (error) {
     // Retry only a confirmed unsupported keyboard, never general auth/network errors.
     if (business && !fallback && error instanceof GrammyError && error.error_code === 400 && /(?:button|keyboard|reply.?markup).*(?:unsupported|not supported|not allowed)|(?:unsupported|not supported|not allowed).*(?:button|keyboard|reply.?markup)/i.test(error.description)) {
@@ -34,12 +62,10 @@ export async function sendPrompt(bot: Bot, lead: Lead, prefix?: string): Promise
   }
 }
 
-async function receive(bot: Bot, data: { connectionId:string; chatId:number; userId:number; name:string; username?:string; text:string; messageId:number; contact?: {phone_number:string;user_id?:number} }): Promise<void> {
+async function receive(bot: Bot, data: { connectionId:string; chatId:number; userId:number; name:string; username?:string; text:string; messageId:number; entryText?:string; contact?: {phone_number:string;user_id?:number} }): Promise<void> {
   const lead = await findLead(data.connectionId,data.chatId);
   if (!lead) {
-    const result = await createLead({...data,firstMessage:data.text || '[вложение]'});
-    // Concurrent first messages must not both start questionnaires.
-    if (result.created) await sendPrompt(bot,result.lead);
+    await recordEntry(data,entryCode(data.entryText ?? ''));
     return;
   }
   if (Number(lead.last_message_id) >= data.messageId) return;
@@ -80,7 +106,7 @@ export function registerConversation(bot: Bot): void {
     if (!from || from.is_bot || msg.chat.type !== 'private' || msg.sender_business_bot) return;
     const connection = await ctx.getBusinessConnection();
     if (!connection.is_enabled || !connection.rights?.can_reply || from.id === connection.user.id || !msg.business_connection_id) return;
-    await receive(bot,{connectionId:msg.business_connection_id,chatId:msg.chat.id,userId:from.id,name:[from.first_name,from.last_name].filter(Boolean).join(' '),username:from.username,text:(msg.text ?? msg.caption ?? '').trim(),messageId:msg.message_id,contact:msg.contact});
+    await receive(bot,{connectionId:msg.business_connection_id,chatId:msg.chat.id,userId:from.id,name:[from.first_name,from.last_name].filter(Boolean).join(' '),username:from.username,text:(msg.text ?? msg.caption ?? '').trim(),entryText:msg.text,messageId:msg.message_id,contact:msg.contact});
   });
   bot.on('message',async ctx => {
     if (ctx.chat.type !== 'private' || ctx.from.is_bot) return;
@@ -91,11 +117,7 @@ export function registerConversation(bot: Bot): void {
       else if (text === '/status') await ctx.reply(await recentCounts(ctx.from.id));
       return;
     }
-    if (text === '/start' && !await findLead('',ctx.chat.id)) {
-      await ctx.reply(`Здравствуйте! Это TENTMAX. Чтобы обсудить ангар, напишите /request.\nЕсли вы менеджер, передайте администратору ваш Telegram ID: ${ctx.from.id}.`);
-      return;
-    }
-    await receive(bot,{connectionId:'',chatId:ctx.chat.id,userId:ctx.from.id,name:ctx.from.first_name,username:ctx.from.username,text,messageId:ctx.message.message_id,contact:ctx.message.contact});
+    await receive(bot,{connectionId:'',chatId:ctx.chat.id,userId:ctx.from.id,name:ctx.from.first_name,username:ctx.from.username,text,entryText:ctx.message.text,messageId:ctx.message.message_id,contact:ctx.message.contact});
   });
   bot.callbackQuery(/^q:(\d+):(\d+):([a-z_]+)$/,async ctx => {
     const [,id,revision,action] = ctx.match;
@@ -113,14 +135,13 @@ export function registerConversation(bot: Bot): void {
       await ctx.answerCallbackQuery({text:'Этот ответ уже учтён. Используйте последнее сообщение или /resume.'}); return;
     }
     // Only buttons actually offered at this step may act on the form.
-    const offered = choices(lead).some(([,key]) => key === action) || (action === 'edit' && lead.step !== 'edit');
+    const offered = choices(lead).some(([,key]) => key === action);
     if (!offered) { await ctx.answerCallbackQuery({text:'Используйте кнопки текущего вопроса.'}); return; }
     const result = evaluate(lead,'',action);
     if (!result.ok) { await ctx.answerCallbackQuery({text:result.reply}); return; }
     const saved = await saveAnswer(lead,result.update);
     await ctx.answerCallbackQuery({text:saved ? undefined : 'Этот ответ уже учтён.'});
     if (!saved) return;
-    await bot.api.editMessageReplyMarkup(msg.chat.id,msg.message_id,{business_connection_id:lead.business_connection_id || undefined,reply_markup:{inline_keyboard:[]}}).catch(() => {});
     await sendPrompt(bot,saved);
     if (saved.status === 'queued') await dispatchOne(bot,saved.id);
   });

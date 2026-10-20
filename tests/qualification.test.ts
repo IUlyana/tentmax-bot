@@ -18,7 +18,7 @@ test('complete TENTMAX dialogue collects every field and requires explicit submi
   assert.equal(lead.step,'city');
   for (const text of ['Казань','18,5','40','6,2']) lead = answer(lead,text);
   lead = answer(lead,'','insulated');
-  for (const text of ['В сентябре','Александр','+7 (999) 123-45-67']) lead = answer(lead,text);
+  for (const text of ['Александр','+7 (999) 123-45-67']) lead = answer(lead,text);
   assert.equal(lead.step,'review'); assert.equal(lead.status,'collecting'); assert.equal(lead.consent,false);
   assert.equal(complete(lead),true); assert.equal(lead.width,'18.5'); assert.equal(lead.wall_height,'6.2');
   assert.equal(lead.insulation,INSULATION.insulated); assert.equal(lead.purpose,PURPOSES.warehouse);
@@ -49,11 +49,18 @@ test('phone is required, supports manual input and own-contact payload',() => {
   assert.equal(answer(lead,'',undefined,'79991234567').phone,'+79991234567');
   assert.equal(answer(lead,'+7 (999) 123-45-67').step,'review');
 });
-test('city, name, deadlines validate input and review cannot send incomplete data',() => {
+test('city and name validate input and review cannot send incomplete data',() => {
   for (const step of ['city','contact_name'] as const) assert.equal(evaluate({...sample(),step},'123').ok,false);
   assert.equal(evaluate({...sample(),step:'review'},'да').ok,false);
   assert.equal(evaluate({...sample(),step:'review'},'','send').ok,false);
   assert.equal(answer({...sample(),step:'review'},'','cancel').status,'cancelled');
-  assert.equal(answer({...sample(),step:'deadline'},'01.06.2027').deadline,'01.06.2027');
-  assert.equal(ORDER.length,9);
+  assert.equal(ORDER.length,8);
+  assert.equal(answer({...sample(),step:'insulation'},'','cold').step,'contact_name');
+  assert.ok(!prompt({...sample(),step:'review'}).includes('Сроки'));
+  assert.ok(!choices({...sample(),step:'edit'}).some(([,action]) => action === 'field_deadline'));
+});
+
+test('correction button is offered only after the questionnaire is complete', () => {
+  for (const step of ORDER) assert.ok(!choices({...sample(),step}).some(([,action]) => action === 'edit'));
+  assert.deepEqual(choices({...sample(),step:'review'}).find(([,action]) => action === 'edit'),['Исправить ответы','edit']);
 });
