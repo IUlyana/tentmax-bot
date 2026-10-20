@@ -36,3 +36,30 @@ CREATE TABLE IF NOT EXISTS leads (
 
 CREATE INDEX IF NOT EXISTS leads_delivery_idx ON leads(status, created_at);
 CREATE INDEX IF NOT EXISTS leads_manager_idx ON leads(assigned_manager_id, created_at);
+
+-- Additive migration: preserve historical lead and dispatch data.
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS purpose TEXT;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS city TEXT;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS width NUMERIC;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS length NUMERIC;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS wall_height NUMERIC;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS insulation TEXT;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS contact_name TEXT;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS resume_step TEXT;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS text_choices BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS form_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE leads ALTER COLUMN form_version SET DEFAULT 2;
+ALTER TABLE leads DROP CONSTRAINT IF EXISTS valid_lead_step;
+UPDATE leads SET step=CASE WHEN status='collecting' THEN 'purpose' ELSE 'done' END,
+  consent=CASE WHEN status='collecting' THEN FALSE ELSE consent END, revision=revision+1,form_version=2
+  WHERE form_version=1;
+ALTER TABLE leads ALTER COLUMN step SET DEFAULT 'purpose';
+ALTER TABLE leads ADD CONSTRAINT valid_lead_step CHECK (step IN
+  ('purpose','city','width','length','wall_height','insulation','deadline','contact_name','phone','review','edit','done'));
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='leads'::regclass AND conname='positive_dimensions') THEN
+    ALTER TABLE leads ADD CONSTRAINT positive_dimensions CHECK
+      ((width IS NULL OR width > 0) AND (length IS NULL OR length > 0) AND (wall_height IS NULL OR wall_height > 0));
+  END IF;
+END $$;

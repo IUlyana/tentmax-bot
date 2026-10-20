@@ -1,6 +1,6 @@
-# Telegram Business Lead Qualifier (MVP)
+# TENTMAX — заявки на тентовые ангары
 
-TypeScript + grammY + PostgreSQL. The customer writes to the **existing company Telegram account**; the connected Business Bot responds only **after** receiving the customer's first incoming message, collects a 5-step brief, requests permission to share data, and sends a qualified lead to one of the managers' **personal Telegram chats**. The manager contacts the customer personally.
+TypeScript + grammY + PostgreSQL. The customer writes to the **existing company Telegram account**; the connected Business Bot responds only **after** receiving the customer's first incoming message, collects the TENTMAX project details, requests permission to share data, and sends a qualified lead to one of the managers' **personal Telegram chats**. The manager contacts the customer personally.
 
 ## Requirements
 
@@ -14,8 +14,10 @@ TypeScript + grammY + PostgreSQL. The customer writes to the **existing company 
 ```bash
 cp .env.example .env
 # Fill BOT_TOKEN and MANAGERS_JSON in .env
-docker compose up -d
-npm install
+# Compose exposes PostgreSQL on 5433 (the template currently uses 5432):
+# DATABASE_URL=postgresql://leads:leads_local_password@127.0.0.1:5433/leads
+docker compose up -d --wait
+npm ci
 npm run dev
 ```
 
@@ -29,20 +31,38 @@ The server automatically creates database tables and syncs configured managers.
 4. On the website, point the button **to the existing company account**: `https://t.me/<company_username>`. Do **not** point the website to the service bot if using Business mode.
 5. From a third, unrelated Telegram account, write a test message to the company. The bot should ask the first question; after answers and consent, one manager will get an alert.
 
-## Questionnaire
+## Сценарий TENTMAX
 
-1. Service
-2. Project description (minimum 20 characters)
-3. Budget (unknown allowed)
-4. Deadline (unknown allowed)
-5. Phone or optional skip
-6. Explicit consent to forward contact/details to a manager
+Вопросы задаются по одному: назначение сооружения → город/регион → ширина → длина → высота прямой стены → тип утепления → сроки → имя → телефон → проверка данных и согласие на передачу менеджеру.
 
-This MVP validates whether answers are present and plausible; it does **not** use AI or guarantee that a lead is genuine. Messages after the lead is assigned aren't auto-answered. `/new` restarts cancelled or unassigned conversations, not already accepted leads.
+- Назначение: склад, производство, спортивный объект, сельское хозяйство, другое.
+- Тип: тёплый (2 слоя тента), холодный, утеплённый (2 слоя тента + утеплитель), нужна консультация.
+- Выбор и отправка заявки — через inline-кнопки. Размеры вводятся отдельно в метрах, допускаются точка и запятая. Обычные сообщения Telegram не поддерживают несколько полей ввода; Web App для этого не требуется.
+- В личном чате с ботом телефон можно отправить стандартной кнопкой `request_contact` либо ввести вручную. Telegram Business не поддерживает reply-клавиатуры и запрос контакта: номер вводится вручную. Чужой контакт не принимается; нужный номер можно ввести текстом.
+- Для Business используется `business_connection_id` при отправке и удалении inline-клавиатур. Если API явно отклоняет клавиатуру как неподдерживаемую, режим текстовых ответов сохраняется для этой анкеты: клиент пишет название варианта, без цифр. Прочие ошибки не маскируются этим fallback.
+- «Изменить данные» / `/edit` позволяет изменить отдельное поле и вернуться к прерванному вопросу или итоговой проверке. `/resume` повторно показывает текущий вопрос. Прогресс сохраняется в PostgreSQL после каждого ответа; тайм-аут анкеты не установлен.
+- Передача менеджеру происходит только после «Отправить заявку» и проверки обязательных полей. «Не отправлять» отменяет передачу. `/new` начинает заново отменённую или оставшуюся без менеджера заявку; принятые заявки повторно не открываются.
+- В личном чате с сервисным ботом клиент начинает через `/request`; `/start` также показывает Telegram ID для регистрации менеджера. Business-диалог начинается только после первого входящего сообщения клиента. Сообщения владельца компании и других ботов игнорируются.
+
+Версия анкеты меняется атомарно при ответах и редактировании. Callback проверяет клиента, чат, Business connection и версию; старые кнопки и параллельные нажатия не меняют данные повторно. Все данные для восстановления хранятся в БД.
+
+## Миграция и проверки
+
+`initDb()` автоматически применяет идемпотентное расширение `sql/schema.sql`: новые поля и версия анкеты добавляются без удаления старых данных. Незавершённые анкеты прежнего сценария начинают новый сценарий с назначения; старые ответы сохраняются в прежних столбцах. Назначенные и принятые заявки сохраняют статус и менеджера. Перед обновлением рабочей БД сделайте резервную копию.
+
+```bash
+npm run check
+npm test
+# Интеграционный тест: отдельная временная схема в указанной PostgreSQL БД.
+# Требуются права CREATE SCHEMA; схема удаляется после теста.
+TEST_DATABASE_URL=postgresql://leads:leads_local_password@127.0.0.1:5433/leads npm test
+```
+
+Без `TEST_DATABASE_URL` интеграционный тест явно пропускается. С ним проверяются реальная PostgreSQL, миграция старой схемы, последовательность обработчиков, возобновление после перезапуска, редактирование, дубли, устаревшие и чужие кнопки, оба способа ввода телефона, Business fallback, содержимое уведомления и принятие менеджером. Telegram API подменён: тест не отправляет сообщения людям и не требует токена. Для проверки в Telegram отдельно нужны действующий токен, Business-подключение и тестовые аккаунты клиента/менеджера.
 
 ## Manager workflow
 
-Each manager receives a message with name, client @username (if any), contact phone (if provided), description, budget and timeline. There are **Take lead** and **Decline** buttons. On decline or failed notification, another manager is tried. An unaccepted lead times out after 30 minutes and is offered to a different manager; never to the same one twice for that application. If nobody is available, the lead becomes `needs_attention` and the optional `ADMIN_TELEGRAM_ID` gets an alert. Manager must send `/start` to the service bot first.
+Each manager receives a message with purpose, city/region, width, length, straight-wall height, insulation type, timeline, contact name, required phone, client Telegram username (if any), Telegram ID and consent status. There are **Take lead** and **Decline** buttons. On decline or failed notification, another manager is tried. An unaccepted lead times out after 30 minutes and is offered to a different manager; never to the same one twice for that application. If nobody is available, the lead becomes `needs_attention` and the optional `ADMIN_TELEGRAM_ID` gets an alert. Manager must send `/start` to the service bot first.
 
 **Contact limitations:** A numeric Telegram ID does not guarantee an unsolicited private chat from a personal account. A public @username supports `https://t.me/username`. A phone number may be hidden by privacy settings. If the client provided neither public @username nor phone, when a manager accepts the lead the client is asked to message that manager first by @username (required in `MANAGERS_JSON`). If the business 24-hour reply window has expired, this notice cannot always be sent; an external CRM/manual follow-up may be required.
 
@@ -61,7 +81,9 @@ Each manager receives a message with name, client @username (if any), contact ph
 
 ## Source
 
-- `src/index.ts` — grammY handlers, Telegram Business events
+- `src/index.ts` — database initialization and polling startup
+- `src/bot.ts` — bot factory, Business connection and manager handlers
+- `src/conversation.ts` — client messages, callback validation, keyboards and Business fallback
 - `src/qualification.ts` — questionnaire + validation
 - `src/dispatch.ts` — manager assignment/notifications
 - `src/db.ts` — PostgreSQL queries and state
