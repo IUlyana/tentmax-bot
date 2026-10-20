@@ -54,9 +54,15 @@ ALTER TABLE leads DROP CONSTRAINT IF EXISTS valid_lead_step;
 UPDATE leads SET step=CASE WHEN status='collecting' THEN 'purpose' ELSE 'done' END,
   consent=CASE WHEN status='collecting' THEN FALSE ELSE consent END, revision=revision+1,form_version=2
   WHERE form_version=1;
+-- Continue questionnaires paused at the retired installation-date question.
+UPDATE leads SET
+  step=CASE WHEN step='deadline' THEN 'contact_name' ELSE step END,
+  resume_step=CASE WHEN resume_step='deadline' THEN 'contact_name' ELSE resume_step END,
+  revision=revision+1
+  WHERE step='deadline' OR resume_step='deadline';
 ALTER TABLE leads ALTER COLUMN step SET DEFAULT 'purpose';
 ALTER TABLE leads ADD CONSTRAINT valid_lead_step CHECK (step IN
-  ('purpose','city','width','length','wall_height','insulation','deadline','contact_name','phone','review','edit','done'));
+  ('purpose','city','width','length','wall_height','insulation','contact_name','phone','review','edit','done'));
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='leads'::regclass AND conname='positive_dimensions') THEN
     ALTER TABLE leads ADD CONSTRAINT positive_dimensions CHECK

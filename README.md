@@ -33,7 +33,7 @@ The server automatically creates database tables and syncs configured managers.
 
 ## Сценарий TENTMAX
 
-Вопросы задаются по одному: назначение сооружения → город/регион → ширина → длина → высота прямой стены → тип утепления → сроки → имя → телефон → проверка данных и согласие на передачу менеджеру.
+Вопросы задаются по одному: назначение сооружения → город/регион → ширина → длина → высота прямой стены → тип утепления → имя → телефон → проверка данных и согласие на передачу менеджеру.
 
 - Назначение: склад, производство, спортивный объект, сельское хозяйство, другое.
 - Тип: тёплый (2 слоя тента), холодный, утеплённый (2 слоя тента + утеплитель), нужна консультация.
@@ -48,7 +48,7 @@ The server automatically creates database tables and syncs configured managers.
 
 ## Миграция и проверки
 
-`initDb()` автоматически применяет идемпотентное расширение `sql/schema.sql`: новые поля и версия анкеты добавляются без удаления старых данных. Незавершённые анкеты прежнего сценария начинают новый сценарий с назначения; старые ответы сохраняются в прежних столбцах. Назначенные и принятые заявки сохраняют статус и менеджера. Перед обновлением рабочей БД сделайте резервную копию.
+`initDb()` автоматически применяет идемпотентное расширение `sql/schema.sql`: новые поля и версия анкеты добавляются без удаления старых данных. Незавершённые анкеты прежнего сценария начинают новый сценарий с назначения; старые ответы сохраняются в прежних столбцах. Назначенные и принятые заявки сохраняют статус и менеджера. Анкеты, остановленные на прежнем вопросе о сроках, продолжаются с имени; ранее сохранённые сроки остаются в БД, но в новой анкете и уведомлении не показываются. Перед обновлением рабочей БД сделайте резервную копию.
 
 ```bash
 npm run check
@@ -62,7 +62,7 @@ TEST_DATABASE_URL=postgresql://leads:leads_local_password@127.0.0.1:5433/leads n
 
 ## Manager workflow
 
-Each manager receives a message with purpose, city/region, width, length, straight-wall height, insulation type, timeline, contact name, required phone, client Telegram username (if any), Telegram ID and consent status. There are **Take lead** and **Decline** buttons. On decline or failed notification, another manager is tried. An unaccepted lead times out after 30 minutes and is offered to a different manager; never to the same one twice for that application. If nobody is available, the lead becomes `needs_attention` and the optional `ADMIN_TELEGRAM_ID` gets an alert. Manager must send `/start` to the service bot first.
+Each manager receives a message with purpose, city/region, width, length, straight-wall height, insulation type, contact name, required phone, client Telegram username (if any), Telegram ID and consent status. There are **Take lead** and **Decline** buttons. On decline or failed notification, another manager is tried. An unaccepted lead times out after 30 minutes and is offered to a different manager; never to the same one twice for that application. If nobody is available, the lead becomes `needs_attention` and the optional `ADMIN_TELEGRAM_ID` gets an alert. Manager must send `/start` to the service bot first.
 
 **Contact limitations:** A numeric Telegram ID does not guarantee an unsolicited private chat from a personal account. A public @username supports `https://t.me/username`. A phone number may be hidden by privacy settings. If the client provided neither public @username nor phone, when a manager accepts the lead the client is asked to message that manager first by @username (required in `MANAGERS_JSON`). If the business 24-hour reply window has expired, this notice cannot always be sent; an external CRM/manual follow-up may be required.
 

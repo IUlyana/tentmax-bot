@@ -56,7 +56,21 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
     const oldSchema = readFileSync('sql/schema.sql','utf8').split('-- Additive migration:')[0];
     await db.pool.query(oldSchema);
     await db.pool.query(`INSERT INTO leads(business_connection_id,client_chat_id,client_telegram_id,step,status,service) VALUES ('legacy',1,1,'description','collecting','Old service'),('legacy',2,2,'done','accepted','Archived service')`);
-    await db.initDb(); await db.initDb();
+    await db.initDb();
+    // Simulate existing TENTMAX forms paused at the removed question or editing
+    // another field before returning to it. Migration must preserve their answers.
+    await db.pool.query('ALTER TABLE leads DROP CONSTRAINT valid_lead_step');
+    await db.pool.query(`INSERT INTO leads(business_connection_id,client_chat_id,client_telegram_id,step,resume_step,purpose,city,revision)
+      VALUES ('retired-step',1,1,'deadline',NULL,'Склад','Тула',7),
+             ('retired-step',2,2,'edit','deadline','Склад','Омск',8)`);
+    await db.initDb();
+    const migrated = await db.findLead('retired-step',1);
+    assert.equal(migrated?.step,'contact_name');
+    assert.equal(migrated?.city,'Тула');
+    assert.equal(migrated?.revision,8);
+    assert.equal((await db.findLead('retired-step',2))?.resume_step,'contact_name');
+    await db.initDb();
+    assert.equal((await db.findLead('retired-step',1))?.revision,8);
     assert.equal((await db.findLead('legacy',1))?.step,'purpose');
     assert.equal((await db.findLead('legacy',2))?.status,'accepted');
     assert.equal((await db.findLead('legacy',2))?.service,'Archived service');
@@ -74,7 +88,9 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
     // Simulate process restart: nothing in memory is required to resume.
     bot = makeBot(); await message('/resume'); assert.equal((await lead()).step,'length');
     await message('40'); await message('6,2');
-    await click('insulated'); await message('В сентябре'); await message('Александр');
+    await click('insulated');
+    assert.equal((await lead()).step,'contact_name');
+    await message('Александр');
     const phoneLead = await lead(); assert.equal(phoneLead.step,'phone');
     const phonePrompt = calls.filter(c => c.method==='sendMessage' && c.payload.text.includes('Оставьте номер')).at(-1)!;
     assert.equal(phonePrompt.payload.reply_markup?.keyboard,undefined);
@@ -93,7 +109,8 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
     const notifications = calls.filter(c => c.method==='sendMessage' && c.payload.chat_id===9002);
     assert.equal(notifications.length,1);
     const notice = notifications[0].payload.text;
-    for (const part of ['Казань','22.5 м','40 м','6.2 м','Утеплённый','В сентябре','Александр','+79991234567','@client_test','Назначение:']) assert.ok(notice.includes(part),part);
+    for (const part of ['Казань','22.5 м','40 м','6.2 м','Утеплённый','Александр','+79991234567','@client_test','Назначение:']) assert.ok(notice.includes(part),part);
+    assert.ok(!notice.includes('Сроки'));
     assert.ok(notifications[0].payload.reply_markup.inline_keyboard[0][0].callback_data.startsWith('accept:'));
     async function managerClick(id:number,action:string) {
       await bot.handleUpdate({update_id:++updateId,callback_query:{id:String(updateId),from:{id,is_bot:false,first_name:'Менеджер'},chat_instance:'manager',data:`${action}:${sent.id}`,message:{message_id:9999,date:1,chat:{id,type:'private'}}}} as any);

@@ -2,7 +2,7 @@ import type { Lead, Step } from './db.js';
 
 export const PURPOSES = { warehouse: 'Склад', production: 'Производство', sport: 'Спортивный объект', agriculture: 'Сельское хозяйство', other: 'Другое' };
 export const INSULATION = { warm: 'Тёплый (2 слоя тента)', cold: 'Холодный', insulated: 'Утеплённый (2 слоя тента + утеплитель)', advice: 'Нужна консультация' };
-export const FIELDS = { purpose: 'Назначение', city: 'Город или регион', width: 'Ширина', length: 'Длина', wall_height: 'Высота прямой стены', insulation: 'Тип ангара', deadline: 'Сроки', contact_name: 'Имя', phone: 'Телефон' };
+export const FIELDS = { purpose: 'Назначение', city: 'Город или регион', width: 'Ширина', length: 'Длина', wall_height: 'Высота прямой стены', insulation: 'Тип ангара', contact_name: 'Имя', phone: 'Телефон' };
 export type Field = keyof typeof FIELDS;
 export const ORDER = Object.keys(FIELDS) as Field[];
 export type Changes = Partial<Pick<Lead, Field | 'step' | 'status' | 'consent' | 'resume_step'>>;
@@ -21,7 +21,6 @@ export function prompt(lead: Lead): string {
     length: 'Какой длины нужен ангар? Укажите в метрах.',
     wall_height: 'Какая нужна высота прямой стены — от земли до начала ската крыши? Укажите в метрах.',
     insulation: 'Какой вариант ангара рассматриваете?',
-    deadline: 'Когда планируете установку? Если сроки ещё не определены, так и напишите.',
     contact_name: 'Как к вам обращаться?',
     phone: 'Оставьте номер телефона, по которому менеджер сможет обсудить с вами проект. Например, +79991234567.',
     review: `Проверьте, пожалуйста, данные:\n\n${summary(lead)}\n\nМожно изменить любой ответ. Отправляя заявку, вы соглашаетесь передать эти данные и ваш Telegram-контакт менеджеру TENTMAX для обсуждения проекта.`,
@@ -88,8 +87,8 @@ export function evaluate(lead: Lead, raw: string, action?: string, contactPhone?
     if (!value) return fail('Проверьте номер: нужен международный формат, например +79991234567. Можно ввести его вручную.');
   } else if (field === 'contact_name') {
     if (text.length < 2 || text.length > 100 || !/\p{L}/u.test(text) || /[\d\n\r]/.test(text)) return fail('Подскажите ваше имя, пожалуйста. Например, Александр.');
-  } else if (text.length < 2 || text.length > 200 || !(field === 'deadline' ? /[\p{L}\d]/u : /\p{L}/u).test(text) || /[\n\r]/.test(text)) {
-    return fail(field === 'city' ? 'Уточните город или регион установки, пожалуйста.' : 'Уточните желаемые сроки или напишите «Пока не определились».');
+  } else if (text.length < 2 || text.length > 200 || !/\p{L}/u.test(text) || /[\n\r]/.test(text)) {
+    return fail('Уточните город или регион установки, пожалуйста.');
   }
   const next = lead.resume_step && lead.resume_step !== field ? lead.resume_step : ORDER[ORDER.indexOf(field) + 1] ?? 'review';
   return {ok:true,update:{[field]:value,step:next,resume_step:null,consent:false}};

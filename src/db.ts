@@ -5,7 +5,7 @@ import { config } from './config.js';
 
 export const pool = new pg.Pool({ connectionString: config.databaseUrl, max: 10 });
 
-export type Step = 'purpose' | 'city' | 'width' | 'length' | 'wall_height' | 'insulation' | 'deadline' | 'contact_name' | 'phone' | 'review' | 'edit' | 'done';
+export type Step = 'purpose' | 'city' | 'width' | 'length' | 'wall_height' | 'insulation' | 'contact_name' | 'phone' | 'review' | 'edit' | 'done';
 export type LeadStatus = 'collecting' | 'queued' | 'dispatching' | 'notified' | 'accepted' | 'cancelled' | 'needs_attention';
 
 export interface Lead {
@@ -88,7 +88,7 @@ export async function createLead(data: {
 // Every answer, edit and submission consumes a revision atomically. Old callbacks
 // and concurrent updates cannot overwrite a newer answer or queue a lead twice.
 export async function saveAnswer(lead: Lead, values: import('./qualification.js').Changes, messageId?: number): Promise<Lead | null> {
-  const allowed = ['purpose','city','width','length','wall_height','insulation','deadline','contact_name','phone','step','status','consent','resume_step'] as const;
+  const allowed = ['purpose','city','width','length','wall_height','insulation','contact_name','phone','step','status','consent','resume_step'] as const;
   const entries = allowed.filter(field => values[field] !== undefined).map(field => [field, values[field]] as const);
   const params: unknown[] = [lead.id, lead.revision, ...entries.map(([,value]) => value)];
   const assignments = entries.map(([field], i) => `${field}=$${i+3}`);
