@@ -35,6 +35,7 @@ export interface Lead {
   deadline: string | null;
   phone: string | null;
   consent: boolean;
+  ai_approved: boolean;
   step: Step;
   status: LeadStatus;
   assigned_manager_id: string | null;
@@ -95,6 +96,8 @@ export async function saveAnswer(lead: Lead, values: import('./qualification.js'
   const entries = allowed.filter(field => values[field] !== undefined).map(field => [field, values[field]] as const);
   const params: unknown[] = [lead.id, lead.revision, ...entries.map(([,value]) => value)];
   const assignments = entries.map(([field], i) => `${field}=$${i+3}`);
+  params.push(values.ai_approved === true && values.status === 'queued' && values.consent === true && values.step === 'done');
+  assignments.push(`ai_approved=$${params.length}`);
   if (messageId !== undefined) {
     params.push(messageId);
     assignments.push(`last_message_id=$${params.length}`);
@@ -106,7 +109,7 @@ export async function saveAnswer(lead: Lead, values: import('./qualification.js'
 
 export async function resetLead(lead: Lead, messageId: number): Promise<Lead | null> {
   const { rows } = await pool.query<Lead>(`UPDATE leads SET purpose=NULL,city=NULL,width=NULL,length=NULL,wall_height=NULL,
-    insulation=NULL,contact_name=NULL,deadline=NULL,phone=NULL,consent=FALSE,step='purpose',resume_step=NULL,
+    insulation=NULL,contact_name=NULL,deadline=NULL,phone=NULL,consent=FALSE,ai_approved=FALSE,step='purpose',resume_step=NULL,
     status='collecting',assigned_manager_id=NULL,tried_manager_ids='{}',notified_at=NULL,accepted_at=NULL,
     last_message_id=$3,revision=revision+1,updated_at=now()
     WHERE id=$1 AND revision=$2 AND status IN ('cancelled','needs_attention') AND last_message_id < $3 RETURNING *`,[lead.id,lead.revision,messageId]);
@@ -129,7 +132,7 @@ export async function claimLeadDispatch(leadId: string, managerId: string): Prom
   const { rows } = await pool.query<Lead>(
     `UPDATE leads SET status='dispatching',assigned_manager_id=$2,
      tried_manager_ids=array_append(tried_manager_ids,$2::bigint),updated_at=now()
-     WHERE id=$1 AND status='queued' RETURNING *`,
+     WHERE id=$1 AND status='queued' AND ai_approved=TRUE AND consent=TRUE RETURNING *`,
     [leadId, managerId],
   );
   return rows[0] ?? null;

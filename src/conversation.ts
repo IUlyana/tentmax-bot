@@ -1,6 +1,7 @@
 import { Bot, GrammyError, InlineKeyboard, Keyboard } from 'grammy';
 import { recordEntry, findLead, getLead, getManager, pool, resetLead, saveAnswer, type Lead } from './db.js';
 import { choices, evaluate, prompt } from './qualification.js';
+import { validateAnswer } from './ai.js';
 import { entryCode } from './entry-message.js';
 import { dispatchOne, recentCounts } from './dispatch.js';
 
@@ -87,7 +88,7 @@ async function receive(bot: Bot, data: { connectionId:string; chatId:number; use
     return;
   }
   const action = lead.text_choices ? choices(lead).find(([label]) => label.toLocaleLowerCase() === data.text.toLocaleLowerCase())?.[1] : undefined;
-  const result = evaluate(lead,data.text,action,data.contact?.phone_number);
+  const result = await validateAnswer(lead,evaluate(lead,data.text,action,data.contact?.phone_number));
   if (!result.ok) {
     const current = await saveAnswer(lead,{step:lead.step},data.messageId);
     if (current) await sendPrompt(bot,current,result.reply);
@@ -95,7 +96,7 @@ async function receive(bot: Bot, data: { connectionId:string; chatId:number; use
   }
   const saved = await saveAnswer(lead,result.update,data.messageId);
   if (!saved) return; // A concurrent update already advanced the form.
-  await sendPrompt(bot,saved);
+  await sendPrompt(bot,saved,result.reply);
   if (saved.status === 'queued') await dispatchOne(bot,saved.id);
 }
 
@@ -137,12 +138,17 @@ export function registerConversation(bot: Bot): void {
     // Only buttons actually offered at this step may act on the form.
     const offered = choices(lead).some(([,key]) => key === action);
     if (!offered) { await ctx.answerCallbackQuery({text:'Используйте кнопки текущего вопроса.'}); return; }
-    const result = evaluate(lead,'',action);
-    if (!result.ok) { await ctx.answerCallbackQuery({text:result.reply}); return; }
+    // Acknowledge the button before awaiting a potentially slow API call.
+    await ctx.answerCallbackQuery();
+    const result = await validateAnswer(lead,evaluate(lead,'',action));
+    if (!result.ok) {
+      const current = await saveAnswer(lead,{step:lead.step});
+      if (current) await sendPrompt(bot,current,result.reply);
+      return;
+    }
     const saved = await saveAnswer(lead,result.update);
-    await ctx.answerCallbackQuery({text:saved ? undefined : 'Этот ответ уже учтён.'});
     if (!saved) return;
-    await sendPrompt(bot,saved);
+    await sendPrompt(bot,saved,result.reply);
     if (saved.status === 'queued') await dispatchOne(bot,saved.id);
   });
 }

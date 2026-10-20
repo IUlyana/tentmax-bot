@@ -1,6 +1,7 @@
 import { Bot, InlineKeyboard } from 'grammy';
 import { config } from './config.js';
-import { summary } from './qualification.js';
+import { checkSemantics, semanticInput, clarification } from './ai.js';
+import { summary, firstInvalidField } from './qualification.js';
 import { pool, type Lead, type Manager, claimLeadDispatch, dispatchFailed, getLead, pendingLeads, recycleExpired, selectManager, setNeedsAttention, setNotified } from './db.js';
 
 export function renderLead(lead: Lead): string {
@@ -21,6 +22,25 @@ let dispatching = false;
 
 export async function dispatchOne(bot: Bot, leadId: string): Promise<void> {
   let current = await getLead(leadId);
+  if (current?.status === 'queued' && (!current.ai_approved || !current.consent)) {
+    // Also protect the dispatcher against legacy or manually queued drafts.
+    const invalidField = firstInvalidField(current);
+    const verdict = invalidField || !current.consent ? null : await checkSemantics(semanticInput(current));
+    if (verdict?.decision === 'unavailable') return;
+    const correction = invalidField ?? (!current.consent ? 'review' : null) ?? (verdict?.decision === 'clarify' ? verdict.field : null);
+    if (correction) {
+      const {rows} = await pool.query<Lead>(`UPDATE leads SET status='collecting',step=$3,resume_step='review',
+        consent=FALSE,ai_approved=FALSE,revision=revision+1,assigned_manager_id=NULL,updated_at=now()
+        WHERE id=$1 AND revision=$2 AND status='queued' RETURNING *`,[current.id,current.revision,correction]);
+      if (rows[0]) {
+        const {sendPrompt} = await import('./conversation.js');
+        await sendPrompt(bot,rows[0],verdict?.decision === 'clarify' ? clarification(verdict.field) : 'Уточните, пожалуйста, данные перед отправкой заявки.');
+      }
+      return;
+    }
+    const {rows} = await pool.query<Lead>(`UPDATE leads SET ai_approved=TRUE WHERE id=$1 AND revision=$2 AND status='queued' RETURNING *`,[current.id,current.revision]);
+    current = rows[0] ?? null;
+  }
   while (current?.status === 'queued') {
     const manager = await selectManager(current.tried_manager_ids);
     if (!manager) {
