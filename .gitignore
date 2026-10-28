@@ -3,3 +3,11 @@ node_modules/
 *.log
 dist/
 .DS_Store
+
+# Локальные заметки/инструкции — не публиковать (DEPLOY.md содержит IP прод-сервера и root-команды)
+CLAUDE.md
+DEPLOY.md
+AUDIT-STAGE-1.md
+STAGE-2-REPORT.md
+STAGE-3-REPORT.md
+STAGE-4-REPORT.md
