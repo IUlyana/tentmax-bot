@@ -91,3 +91,12 @@ CREATE TABLE IF NOT EXISTS conversation_entries (
 CREATE INDEX IF NOT EXISTS conversation_entries_due_idx ON conversation_entries(start_after) WHERE start_after IS NOT NULL;
 
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS ai_approved BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Consecutive irrelevant answers on the current question, and whether the
+-- automatic dialog was stopped after two of them (resumable only via /resume).
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS stopped BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Set when the client picked "Другое" for the purpose: the current question then
+-- accepts a free-text purpose instead of a fixed button choice.
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS awaiting_custom BOOLEAN NOT NULL DEFAULT FALSE;

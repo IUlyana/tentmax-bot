@@ -32,9 +32,31 @@ test('dimensions accept decimal separators, reject invalid, negative and non-fin
 });
 test('choices require buttons; all purposes and insulation options work',() => {
   assert.equal(evaluate(sample(),'1').ok,false);
-  for (const key of Object.keys(PURPOSES)) assert.equal(answer(sample(),'',key).purpose,PURPOSES[key as keyof typeof PURPOSES]);
+  for (const key of Object.keys(PURPOSES).filter(k => k !== 'other')) assert.equal(answer(sample(),'',key).purpose,PURPOSES[key as keyof typeof PURPOSES]);
   for (const key of Object.keys(INSULATION)) assert.equal(answer({...sample(),step:'insulation'},'',key).insulation,INSULATION[key as keyof typeof INSULATION]);
   assert.equal(choices({...sample(),step:'insulation'}).length,4);
+});
+test('"Другое" lets the client type a custom purpose and keeps fixed options working',() => {
+  // Clicking "Другое" switches the purpose question to free text without storing a label.
+  let lead = answer(sample(),'','other');
+  assert.equal(lead.awaiting_custom,true);
+  assert.equal(lead.purpose,null);
+  assert.equal(lead.step,'purpose');
+  assert.match(prompt(lead),/своими словами/);
+  // Noise is still rejected; a real description is stored and advances the form.
+  assert.equal(evaluate(lead,'ggg').ok,false);
+  lead = answer(lead,'Автосервис');
+  assert.equal(lead.purpose,'Автосервис');
+  assert.equal(lead.awaiting_custom,false);
+  assert.equal(lead.step,'city');
+  // A stored free-text purpose passes the completeness check.
+  assert.equal(firstInvalidField({...sample(),purpose:'Автосервис',city:'Казань',width:'20',length:'30',wall_height:'6',insulation:INSULATION.cold,contact_name:'Иван',phone:'+79991234567'}),null);
+  // Editing purpose can pick "Другое" again and return to the review summary.
+  let edit = {...sample(),step:'review' as const,purpose:PURPOSES.warehouse} as Lead;
+  edit = answer(edit,'','edit'); edit = answer(edit,'','field_purpose');
+  edit = answer(edit,'','other'); assert.equal(edit.awaiting_custom,true);
+  edit = answer(edit,'Ангар для техники');
+  assert.equal(edit.purpose,'Ангар для техники'); assert.equal(edit.step,'review');
 });
 test('editing one field returns to interrupted step and keeps other answers',() => {
   let lead = {...sample(),step:'length' as const,city:'Москва',width:'20'} as Lead;
@@ -62,7 +84,7 @@ test('city and name validate input and review cannot send incomplete data',() =>
 
 test('correction button is offered only after the questionnaire is complete', () => {
   for (const step of ORDER) assert.ok(!choices({...sample(),step}).some(([,action]) => action === 'edit'));
-  assert.deepEqual(choices({...sample(),step:'review'}).find(([,action]) => action === 'edit'),['Исправить ответы','edit']);
+  assert.deepEqual(choices({...sample(),step:'review'}).find(([,action]) => action === 'edit'),['Изменить ответы','edit']);
 });
 
 test('repeated letters cannot be accepted as a city or name, even before AI review',() => {

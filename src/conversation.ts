@@ -91,6 +91,15 @@ async function receive(bot: Bot, data: { connectionId:string; chatId:number; use
     return;
   }
   if (Number(lead.last_message_id) >= data.messageId) return;
+  if (lead.stopped) {
+    // A stopped dialog is not resumed by a random message; only explicit /resume
+    // continues it from the saved question, clearing the attempt counter.
+    if (lead.status === 'collecting' && data.text === '/resume') {
+      const resumed = await saveAnswer(lead,{step:lead.step,attempts:0,stopped:false},data.messageId);
+      if (resumed) await sendPrompt(bot,resumed,undefined,display);
+    }
+    return;
+  }
   if (data.text.toLowerCase() === '/new') {
     const restarted = await resetLead(lead,data.messageId);
     if (restarted) await sendPrompt(bot,restarted,undefined,display);
@@ -111,11 +120,24 @@ async function receive(bot: Bot, data: { connectionId:string; chatId:number; use
   const action = lead.text_choices ? choices(lead).find(([label]) => label.toLocaleLowerCase() === data.text.toLocaleLowerCase())?.[1] : undefined;
   const result = await validateAnswer(lead,evaluate(lead,data.text,action,data.contact?.phone_number));
   if (!result.ok) {
-    const current = await saveAnswer(lead,{step:lead.step},data.messageId);
+    if (result.retry) {
+      // AI check unavailable: reprompt without consuming an attempt.
+      const current = await saveAnswer(lead,{step:lead.step},data.messageId);
+      if (current) await sendPrompt(bot,current,result.reply,display);
+      return;
+    }
+    const attempts = lead.attempts + 1;
+    if (attempts >= 2) {
+      // Second consecutive irrelevant answer: stop the automatic dialog silently.
+      await saveAnswer(lead,{step:lead.step,attempts,stopped:true},data.messageId);
+      return;
+    }
+    // First irrelevant answer: reformulate the current question once.
+    const current = await saveAnswer(lead,{step:lead.step,attempts},data.messageId);
     if (current) await sendPrompt(bot,current,result.reply,display);
     return;
   }
-  const saved = await saveAnswer(lead,result.update,data.messageId);
+  const saved = await saveAnswer(lead,{...result.update,attempts:0},data.messageId);
   if (!saved) return; // A concurrent update already advanced the form.
   await sendPrompt(bot,saved,result.reply,display);
   if (saved.status === 'queued') await dispatchOne(bot,saved.id);
@@ -154,7 +176,7 @@ export function registerConversation(bot: Bot): void {
       const connection = await bot.api.getBusinessConnection(lead.business_connection_id);
       if (!connection.is_enabled || !connection.rights?.can_reply || ctx.from.id === connection.user.id) { await ctx.answerCallbackQuery({text:'Не удалось ответить в этом чате.'}); return; }
     }
-    if (lead.status !== 'collecting' || lead.revision !== Number(revision)) {
+    if (lead.status !== 'collecting' || lead.stopped || lead.revision !== Number(revision)) {
       await ctx.answerCallbackQuery({text:'Этот ответ уже учтён. Используйте последнее сообщение или /resume.'}); return;
     }
     // Only buttons actually offered at this step may act on the form.
@@ -168,7 +190,7 @@ export function registerConversation(bot: Bot): void {
       if (current) await sendPrompt(bot,current,result.reply);
       return;
     }
-    const saved = await saveAnswer(lead,result.update);
+    const saved = await saveAnswer(lead,{...result.update,attempts:0});
     if (!saved) return;
     await sendPrompt(bot,saved,result.reply);
     if (saved.status === 'queued') await dispatchOne(bot,saved.id);

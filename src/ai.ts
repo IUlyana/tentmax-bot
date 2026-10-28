@@ -101,7 +101,7 @@ export async function validateAnswer(lead: Lead, answer: AnswerResult): Promise<
   if (!submission && (!field || answer.update[field] === undefined)) return answer;
   const input = submission ? semanticInput(lead) : {[field!]: answer.update[field!]!} as SemanticInput;
   const verdict = await checkSemantics(input);
-  if (verdict.decision === 'unavailable') return {ok:false,reply:AI_RETRY};
+  if (verdict.decision === 'unavailable') return {ok:false,reply:AI_RETRY,retry:true};
   if (verdict.decision === 'clarify') {
     if (!submission) return {ok:false,reply:clarification(verdict.field)};
     return {ok:true,update:{step:verdict.field,resume_step:'review',consent:false},reply:clarification(verdict.field)};

@@ -30,7 +30,7 @@ export async function dispatchOne(bot: Bot, leadId: string): Promise<void> {
     const correction = invalidField ?? (!current.consent ? 'review' : null) ?? (verdict?.decision === 'clarify' ? verdict.field : null);
     if (correction) {
       const {rows} = await pool.query<Lead>(`UPDATE leads SET status='collecting',step=$3,resume_step='review',
-        consent=FALSE,ai_approved=FALSE,revision=revision+1,assigned_manager_id=NULL,updated_at=now()
+        consent=FALSE,ai_approved=FALSE,attempts=0,stopped=FALSE,awaiting_custom=FALSE,revision=revision+1,assigned_manager_id=NULL,updated_at=now()
         WHERE id=$1 AND revision=$2 AND status='queued' RETURNING *`,[current.id,current.revision,correction]);
       if (rows[0]) {
         const {sendPrompt} = await import('./conversation.js');

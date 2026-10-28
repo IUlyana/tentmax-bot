@@ -36,6 +36,9 @@ export interface Lead {
   phone: string | null;
   consent: boolean;
   ai_approved: boolean;
+  attempts: number;
+  stopped: boolean;
+  awaiting_custom: boolean;
   step: Step;
   status: LeadStatus;
   assigned_manager_id: string | null;
@@ -92,7 +95,7 @@ export async function createLead(data: {
 // Every answer, edit and submission consumes a revision atomically. Old callbacks
 // and concurrent updates cannot overwrite a newer answer or queue a lead twice.
 export async function saveAnswer(lead: Lead, values: import('./qualification.js').Changes, messageId?: number): Promise<Lead | null> {
-  const allowed = ['purpose','city','width','length','wall_height','insulation','contact_name','phone','step','status','consent','resume_step'] as const;
+  const allowed = ['purpose','city','width','length','wall_height','insulation','contact_name','phone','step','status','consent','resume_step','attempts','stopped','awaiting_custom'] as const;
   const entries = allowed.filter(field => values[field] !== undefined).map(field => [field, values[field]] as const);
   const params: unknown[] = [lead.id, lead.revision, ...entries.map(([,value]) => value)];
   const assignments = entries.map(([field], i) => `${field}=$${i+3}`);
@@ -109,7 +112,7 @@ export async function saveAnswer(lead: Lead, values: import('./qualification.js'
 
 export async function resetLead(lead: Lead, messageId: number): Promise<Lead | null> {
   const { rows } = await pool.query<Lead>(`UPDATE leads SET purpose=NULL,city=NULL,width=NULL,length=NULL,wall_height=NULL,
-    insulation=NULL,contact_name=NULL,deadline=NULL,phone=NULL,consent=FALSE,ai_approved=FALSE,step='purpose',resume_step=NULL,
+    insulation=NULL,contact_name=NULL,deadline=NULL,phone=NULL,consent=FALSE,ai_approved=FALSE,attempts=0,stopped=FALSE,awaiting_custom=FALSE,step='purpose',resume_step=NULL,
     status='collecting',assigned_manager_id=NULL,tried_manager_ids='{}',notified_at=NULL,accepted_at=NULL,
     last_message_id=$3,revision=revision+1,updated_at=now()
     WHERE id=$1 AND revision=$2 AND status IN ('cancelled','needs_attention') AND last_message_id < $3 RETURNING *`,[lead.id,lead.revision,messageId]);
@@ -218,13 +221,22 @@ export interface ConversationEntry {
 }
 
 export async function recordEntry(data: EntryInput, code: string | null, client: Pick<pg.Pool,'query'> = pool): Promise<boolean> {
+  // Silence means three minutes after the last new client message: a further
+  // message while waiting restarts the countdown (keeping the original rv-code),
+  // but a greeting with no prior trigger never arms it. Redelivery of one update
+  // (message_id not greater) changes nothing, so it cannot restart the timer.
   const result = await client.query(`INSERT INTO conversation_entries
     (business_connection_id,chat_id,user_id,client_name,username,message_id,message_text,request_code,start_after)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,CASE WHEN $8::text IS NULL THEN NULL ELSE now()+interval '3 minutes' END)
     ON CONFLICT (business_connection_id,chat_id) DO UPDATE SET
       user_id=EXCLUDED.user_id,client_name=EXCLUDED.client_name,username=EXCLUDED.username,
       message_id=EXCLUDED.message_id,message_text=EXCLUDED.message_text,
-      request_code=EXCLUDED.request_code,start_after=EXCLUDED.start_after,received_at=now()
+      request_code=COALESCE(EXCLUDED.request_code,conversation_entries.request_code),
+      start_after=CASE
+        WHEN EXCLUDED.request_code IS NOT NULL THEN now()+interval '3 minutes'
+        WHEN conversation_entries.start_after IS NOT NULL THEN now()+interval '3 minutes'
+        ELSE NULL END,
+      received_at=now()
     WHERE conversation_entries.message_id < EXCLUDED.message_id RETURNING message_id`,
     [data.connectionId,data.chatId,data.userId,data.name,data.username ?? null,data.messageId,data.text,code]);
   return !!result.rowCount;
@@ -281,6 +293,8 @@ export async function clearTestConversation(data: EntryInput): Promise<{handled:
     await client.query('BEGIN');
     // Lock the entry before the lead, matching activateEntry's lock order.
     if (!await recordEntry(data,null,client)) { await client.query('ROLLBACK'); return {handled:false,lead:null}; }
+    // A reset always cancels a pending start, overriding the restart-on-message rule.
+    await client.query('UPDATE conversation_entries SET start_after=NULL WHERE business_connection_id=$1 AND chat_id=$2',[data.connectionId,data.chatId]);
     const current = await client.query<Lead>(`SELECT * FROM leads WHERE business_connection_id=$1 AND client_chat_id=$2 FOR UPDATE`,[data.connectionId,data.chatId]);
     const lead = current.rows[0];
     if (lead && (lead.client_telegram_id !== String(data.userId) || Number(lead.last_message_id) >= data.messageId)) {
