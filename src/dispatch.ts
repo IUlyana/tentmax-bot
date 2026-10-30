@@ -1,8 +1,8 @@
-import { Bot, InlineKeyboard } from 'grammy';
+import { Bot } from 'grammy';
 import { config } from './config.js';
 import { checkSemantics, semanticInput, clarification } from './ai.js';
 import { summary, firstInvalidField } from './qualification.js';
-import { pool, type Lead, type Manager, claimLeadDispatch, dispatchFailed, getLead, pendingLeads, recycleExpired, selectManager, setNeedsAttention, setNotified } from './db.js';
+import { pool, type Lead, claimLeadDispatch, dispatchFailed, getLead, pendingLeads, recycleExpired, selectManager, setNeedsAttention, setNotified } from './db.js';
 
 export function renderLead(lead: Lead): string {
   const username = lead.client_username ? `@${lead.client_username} — https://t.me/${lead.client_username}` : 'не установлен';
@@ -13,7 +13,7 @@ export function renderLead(lead: Lead): string {
     `Telegram: ${username}`,
     `Telegram ID: ${lead.client_telegram_id}`,
     `Согласие на передачу: ${lead.consent ? 'получено' : 'не получено'}`,
-    'Пожалуйста, примите заявку до конца дня по московскому времени. Без ответа она будет передана следующему менеджеру. Если не можете принять, нажмите кнопку отказа.',
+    'Свяжитесь с клиентом напрямую по указанному контакту.',
     ...(!lead.purpose ? [`Архивная заявка: ${lead.service ?? '—'}; ${lead.description ?? '—'}; бюджет: ${lead.budget ?? '—'}`, `Имя Telegram: ${lead.client_name}`] : []),
   ].join('\n');
 }
@@ -51,8 +51,7 @@ export async function dispatchOne(bot: Bot, leadId: string): Promise<void> {
     const locked = await claimLeadDispatch(leadId, manager.telegram_id);
     if (!locked) return;
     try {
-      const keyboard = new InlineKeyboard().text('✅ Взять в работу', `accept:${leadId}`).row().text('⏭ Не могу принять', `decline:${leadId}`);
-      await bot.api.sendMessage(Number(manager.telegram_id), renderLead(locked), { reply_markup: keyboard });
+      await bot.api.sendMessage(Number(manager.telegram_id), renderLead(locked));
       await setNotified(leadId);
       return;
     } catch (error) {
@@ -74,21 +73,6 @@ export async function dispatchQueued(bot: Bot): Promise<void> {
     }
   } finally {
     dispatching = false;
-  }
-}
-
-export async function informClientOnAcceptance(bot: Bot, lead: Lead, manager: Manager): Promise<void> {
-  const name = manager.name;
-  const personalContactAvailable = !!lead.client_username || !!lead.phone;
-  const link = manager.username ? `https://t.me/${manager.username}` : undefined;
-  const text = personalContactAvailable
-    ? `Вашу заявку #${lead.id} взял в работу менеджер ${name}. Он постарается связаться с вами напрямую.${link ? `\n\nЕсли не получите сообщение или хотите написать первым: ${link}` : ''}`
-    : `Вашу заявку #${lead.id} взял в работу менеджер ${name}.${link ? `\n\nУ вас нет публичного @username или телефона — пожалуйста, напишите ему первым: ${link}` : '\n\nПожалуйста, дождитесь сообщения в рабочем чате компании.'}`;
-  try {
-    await bot.api.sendMessage(Number(lead.client_chat_id), text, { business_connection_id: lead.business_connection_id || undefined });
-  } catch (error) {
-    // Telegram Business usually requires a recent incoming customer message (24 hours).
-    console.error(`Cannot notify client for lead #${lead.id}:`, error instanceof Error ? error.message : 'Unknown error');
   }
 }
 

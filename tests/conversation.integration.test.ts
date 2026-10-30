@@ -279,14 +279,8 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
     const notice = notifications[0].payload.text;
     for (const part of ['Москва','22.5 м','40 м','6.2 м','Утеплённый','Александр','+79991234567','@client_test','Назначение:','rv-267087']) assert.ok(notice.includes(part),part);
     assert.ok(!notice.includes('Сроки'));
-    assert.ok(notifications[0].payload.reply_markup.inline_keyboard[0][0].callback_data.startsWith('accept:'));
-    async function managerClick(id:number,action:string,leadId:string=sent.id) {
-      await bot.handleUpdate({update_id:++updateId,callback_query:{id:String(updateId),from:{id,is_bot:false,first_name:'Менеджер'},chat_instance:'manager',data:`${action}:${leadId}`,message:{message_id:9999,date:1,chat:{id,type:'private'}}}} as any);
-    }
-    await managerClick(9001,'accept'); assert.equal((await lead()).status,'notified');
-    await managerClick(9002,'accept'); assert.equal((await lead()).status,'accepted');
-    await managerClick(9002,'accept'); assert.equal((await lead()).status,'accepted');
-    assert.ok(calls.some(c => c.method==='sendMessage' && c.payload.chat_id===42 && c.payload.business_connection_id==='business-test' && c.payload.text.includes('взял в работу')));
+    // The lead goes to a single manager with no accept/decline buttons.
+    assert.equal(notifications[0].payload.reply_markup,undefined);
     // Direct chat supports request_contact and own contact submission.
     await message('/request',undefined,false);
     assert.equal(await db.findLead('',42),null);
@@ -328,43 +322,27 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
     const revision = (await lead()).revision;
     await message('Москва',undefined,true,messageId); // replay of the last input
     assert.equal((await lead()).revision,revision);
-    // The manager has the whole Moscow calendar day, independent of the host
-    // timezone and the notification's age. Boundaries use a deterministic clock.
+    // The lead goes to a single manager and stays with them: a delivered
+    // (notified) lead is terminal and is never reassigned, regardless of age or
+    // the Moscow calendar day. Only a dispatch left stuck by a crash is reclaimed.
     const {dispatchOne} = await import('../src/dispatch.js');
-    async function notifiedCase(chatId:number, notifiedAt:string, status='notified') {
-      const {lead:item} = await db.createLead({connectionId:'deadline-test',chatId,userId:chatId,name:'Test',messageId:1});
-      await db.pool.query(`UPDATE leads SET status=$2,notified_at=$3,consent=TRUE,ai_approved=TRUE,assigned_manager_id=9001,tried_manager_ids='{9001}' WHERE id=$1`,[item.id,status,notifiedAt]);
+    failManager = false;
+    async function seedLead(connectionId:string, chatId:number, patch:string) {
+      const {lead:item} = await db.createLead({connectionId,chatId,userId:chatId,name:'Test',messageId:1});
+      await db.pool.query(`UPDATE leads SET consent=TRUE,ai_approved=TRUE,purpose='Склад',city='Казань',width=20,length=30,wall_height=6,insulation='Холодный',contact_name='Иван',phone='+79991234567',${patch} WHERE id=$1`,[item.id]);
       return item.id;
     }
-    const morning = await notifiedCase(1001,'2026-10-20T06:00:00Z');
-    const lastMinute = await notifiedCase(1002,'2026-10-20T20:59:30Z');
-    const followingDay = await notifiedCase(1003,'2026-10-20T21:01:00Z');
-    const accepted = await notifiedCase(1004,'2026-10-19T06:00:00Z','accepted');
-    await db.recycleExpired(new Date('2026-10-20T20:59:59.999Z'));
-    assert.equal((await db.getLead(morning))?.status,'notified'); // More than 30 minutes old.
-    assert.equal((await db.getLead(lastMinute))?.status,'notified');
-    await db.recycleExpired(new Date('2026-10-20T21:00:00Z')); // Midnight in Moscow.
-    assert.equal((await db.getLead(morning))?.status,'queued');
-    assert.equal((await db.getLead(lastMinute))?.status,'queued'); // Only 30 seconds old.
-    assert.equal((await db.getLead(lastMinute))?.assigned_manager_id,null);
-    assert.deepEqual((await db.getLead(lastMinute))?.tried_manager_ids,['9001']);
-    assert.equal((await db.getLead(followingDay))?.status,'notified');
+    const kept = await seedLead('keep',1001,`status='notified',notified_at=now()-interval '2 days',assigned_manager_id=9001,tried_manager_ids='{9001}'`);
+    const accepted = await seedLead('acc',1004,`status='accepted',assigned_manager_id=9001,tried_manager_ids='{9001}'`);
+    const fresh = await seedLead('fresh',1009,`status='dispatching',assigned_manager_id=9001,tried_manager_ids='{9001}'`);
+    const stuck = await seedLead('stuck',1008,`status='dispatching',assigned_manager_id=9001,tried_manager_ids='{9001}',updated_at=now()-interval '10 minutes'`);
+    await db.recycleExpired();
+    assert.equal((await db.getLead(kept))?.status,'notified'); // Never taken from its manager.
     assert.equal((await db.getLead(accepted))?.status,'accepted');
-    await dispatchOne(bot,lastMinute);
-    assert.equal((await db.getLead(lastMinute))?.assigned_manager_id,'9002');
-    assert.equal((await db.getLead(lastMinute))?.status,'notified');
-    // Explicit refusal still transfers immediately within the same day.
-    assert.ok(await db.declineLead(followingDay,'9001'));
-    await dispatchOne(bot,followingDay);
-    assert.equal((await db.getLead(followingDay))?.assigned_manager_id,'9002');
-    // After reassignment the previous manager's stale button can no longer accept.
-    await managerClick(9001,'accept',lastMinute);
-    assert.equal((await db.getLead(lastMinute))?.status,'notified');
-    assert.equal((await db.getLead(lastMinute))?.assigned_manager_id,'9002');
-    // Simultaneous accepts of the same lead cannot create two responsible managers.
-    await Promise.all([managerClick(9002,'accept',lastMinute),managerClick(9002,'accept',lastMinute)]);
-    assert.equal((await db.getLead(lastMinute))?.status,'accepted');
-    assert.equal((await db.getLead(lastMinute))?.assigned_manager_id,'9002');
+    assert.equal((await db.getLead(fresh))?.status,'dispatching'); // Recent: still in flight.
+    assert.equal((await db.getLead(stuck))?.status,'queued'); // Crash-stuck: reclaimed.
+    assert.equal((await db.getLead(stuck))?.assigned_manager_id,null);
+    assert.deepEqual((await db.getLead(stuck))?.tried_manager_ids,[]); // Can be re-delivered to the same manager.
     // No available managers left: the lead needs attention and the admin is alerted.
     const {lead:exhausted} = await db.createLead({connectionId:'exhausted',chatId:1007,userId:1007,name:'Test',messageId:1});
     await db.pool.query(`UPDATE leads SET status='queued',consent=TRUE,ai_approved=TRUE,purpose='Склад',city='Казань',width=20,length=30,wall_height=6,insulation='Холодный',contact_name='Иван',phone='+79991234567',tried_manager_ids='{9001,9002}' WHERE id=$1`,[exhausted.id]);
@@ -410,7 +388,6 @@ test('PostgreSQL + Telegram handlers: migration, resume, edits, stale buttons, d
     assert.equal(await db.findLead('business-test',42),null);
     assert.equal((await db.findLead('',42))?.id,preservedDirect?.id);
     assert.equal((await db.getLead(accepted))?.status,'accepted'); // Another client untouched.
-    assert.equal(await db.acceptLead(oldTest.id,'9002'),null);
     await click('warehouse',oldTest);
     assert.equal(await db.findLead('business-test',42),null);
     await message('Здравствуйте');

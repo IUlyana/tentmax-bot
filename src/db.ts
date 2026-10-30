@@ -163,34 +163,13 @@ export async function getLead(leadId: string): Promise<Lead | null> {
   return rows[0] ?? null;
 }
 
-export async function acceptLead(leadId: string, managerId: string): Promise<Lead | null> {
-  const { rows } = await pool.query<Lead>(
-    `UPDATE leads SET status='accepted',accepted_at=now(),updated_at=now()
-     WHERE id=$1 AND assigned_manager_id=$2 AND status='notified' RETURNING *`,
-    [leadId, managerId],
-  );
-  return rows[0] ?? null;
-}
-
-export async function declineLead(leadId: string, managerId: string): Promise<Lead | null> {
-  const { rows } = await pool.query<Lead>(
-    `UPDATE leads SET status='queued',assigned_manager_id=NULL,notified_at=NULL,updated_at=now()
-     WHERE id=$1 AND assigned_manager_id=$2 AND status='notified' RETURNING *`,
-    [leadId, managerId],
-  );
-  return rows[0] ?? null;
-}
-
-export async function recycleExpired(asOf?: Date): Promise<void> {
+// A lead goes to a single available manager and stays with them. Only reclaim
+// dispatches stuck mid-send by a crash or restart, clearing the attempt so the
+// lead is re-delivered to the same manager instead of being lost. Notified leads
+// are terminal and are never reassigned.
+export async function recycleExpired(): Promise<void> {
   await pool.query(
-    `UPDATE leads SET status='queued',assigned_manager_id=NULL,notified_at=NULL,updated_at=now()
-     WHERE status='notified'
-       AND (notified_at AT TIME ZONE 'Europe/Moscow')::date
-         < (COALESCE($1::timestamptz,now()) AT TIME ZONE 'Europe/Moscow')::date`,
-    [asOf ?? null],
-  );
-  await pool.query(
-    `UPDATE leads SET status='queued',assigned_manager_id=NULL,updated_at=now()
+    `UPDATE leads SET status='queued',assigned_manager_id=NULL,tried_manager_ids='{}',updated_at=now()
      WHERE status='dispatching' AND updated_at < now() - interval '5 minutes'`,
   );
 }
